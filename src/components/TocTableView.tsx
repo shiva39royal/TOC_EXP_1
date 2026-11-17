@@ -40,7 +40,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
   const [search, setSearch] = useState('');
   const [editingSlNo, setEditingSlNo] = useState<number | null>(null);
 
-  const isCtf = project.tocFormatPreference === 'CHITGIDDA_SELECTION';
+  const isStandardSelection = project.tocFormatPreference !== 'TCAS_TOC' && project.tocFormatPreference !== 'JANKAMPET_TOC';
 
   const normalRoutes = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -67,21 +67,21 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
           <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md">
             <button
               type="button"
-              onClick={() => onChangeFormat('CHITGIDDA_SELECTION')}
+              onClick={() => onChangeFormat('STANDARD_SELECTION')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap ${
-                isCtf ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                isStandardSelection ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              CTF Selection Format
+              Standard Selection Format (RDSO Amdt-6)
             </button>
             <button
               type="button"
-              onClick={() => onChangeFormat('JANKAMPET_TOC')}
+              onClick={() => onChangeFormat('TCAS_TOC')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap ${
-                !isCtf ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                !isStandardSelection ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              JKM TCAS TOC Format
+              TCAS Station TOC Format
             </button>
           </div>
 
@@ -146,34 +146,47 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => exportTocToExcel(project)}
+            onClick={() => exportTocToExcel(project, section)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md cursor-pointer whitespace-nowrap"
+            title="Export currently selected table to Excel"
           >
             <FileSpreadsheet className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Export Excel</span>
           </button>
           <button
             type="button"
-            onClick={() => exportTocToCsv(project)}
+            onClick={() => exportTocToCsv(project, section)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer whitespace-nowrap"
+            title="Export currently selected table to CSV"
           >
             <Download className="w-3.5 h-3.5" aria-hidden="true" />
             <span>CSV</span>
           </button>
           <button
             type="button"
-            onClick={() => exportCanonicalJson(project)}
+            onClick={() => exportCanonicalJson(project, section)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer whitespace-nowrap"
+            title="Export currently selected table to JSON"
           >
             <span>JSON</span>
           </button>
           <button
             type="button"
-            onClick={() => exportTocToPdf(project)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 hover:bg-slate-50 rounded-md cursor-pointer whitespace-nowrap"
+            onClick={() => exportTocToPdf(project, section)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-md cursor-pointer whitespace-nowrap"
+            title="Print currently selected table as PDF"
           >
             <Printer className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Print PDF</span>
+          </button>
+          <div className="h-4 w-px bg-slate-300 mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            onClick={() => exportTocToPdf(project, 'all')}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded cursor-pointer whitespace-nowrap"
+            title="Print entire 12-page RDSO booklet including all tables"
+          >
+            <span>Print All Tables</span>
           </button>
         </div>
       </div>
@@ -194,7 +207,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
             </div>
             <div>
               <span className="text-slate-500">Ref Layout: </span>
-              <span className="font-mono text-slate-800">{project.metadata.refLayout || 'IPU.0012C/ALT-5'}</span>
+              <span className="font-mono text-slate-800">{project.metadata.refLayout || '----'}</span>
             </div>
             <div>
               <span className="text-slate-500">Specification: </span>
@@ -247,6 +260,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                   <th className="py-2.5 px-2.5 border-r border-slate-200">Signal Type</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200">Aspect of Entry Sig</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200">Requires Aspects Exit</th>
+                  <th className="py-2.5 px-2.5 border-r border-slate-200">Req Route Locking</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200">Pts Normal</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200">Pts Reverse</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200">Track Ckt (Route)</th>
@@ -257,6 +271,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                   <th className="py-2.5 px-2.5 border-r border-slate-200 min-w-[200px]">Check RFID Sequence</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200 text-right">Dist (m)</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200 text-center">MA (Sec)</th>
+                  <th className="py-2.5 px-2.5 border-r border-slate-200 text-center">SR Speed</th>
                   <th className="py-2.5 px-2.5 border-r border-slate-200 text-center">OS Speed</th>
                   <th className="py-2.5 px-2.5 no-print text-right">Actions</th>
                 </tr>
@@ -266,13 +281,10 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                   const isHighlighted = highlightedRouteSlNo === r.slNo;
                   const isEditing = editingSlNo === r.slNo;
                   const seqParts: string[] = [];
-                  if (r.entryFootTag && r.entryFootTag !== '-' && r.entryFootTag !== '--') {
-                    seqParts.push(`(0, ${r.entryFootTag})`);
-                  }
                   for (const s of r.linkingSequence) {
                     if (s.tagId !== r.entryFootTag) seqParts.push(`(${s.distanceM}, ${s.tagId})`);
                   }
-                  const displaySeq = seqParts.length > 0 ? seqParts.join(', ') : (r.enRouteTags.join(', ') || '-');
+                  const displaySeq = seqParts.length > 0 ? seqParts.join(', ') : (r.enRouteTags.filter((t) => t !== r.entryFootTag).join(', ') || '-');
 
                   const perms = r.aspectPermutations && r.aspectPermutations.length > 0
                     ? r.aspectPermutations
@@ -323,6 +335,9 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                       <td className="py-2 px-2.5 border-r border-slate-200 text-slate-600">
                         {perm.requiresAspectOfExitSignal}
                       </td>
+                      <td className="py-2 px-2.5 border-r border-slate-200 font-mono text-center font-semibold text-slate-800">
+                        {pIdx === 0 ? (r.requiredRouteLocking || '-') : ''}
+                      </td>
                       <td className="py-2 px-2.5 border-r border-slate-200 font-mono text-emerald-800">
                         {pIdx === 0 ? (r.pointsNormal.join(', ') || '-') : ''}
                       </td>
@@ -352,6 +367,9 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                       </td>
                       <td className="py-2 px-2.5 border-r border-slate-200 text-center font-mono font-semibold text-slate-900">
                         {perm.movementAuthoritySections}
+                      </td>
+                      <td className="py-2 px-2.5 border-r border-slate-200 text-center font-mono font-semibold text-slate-800">
+                        {pIdx === 0 ? (r.authorizedSpeedSr || perm.authorizedSpeedSr || 'MPS') : (perm.authorizedSpeedSr || '')}
                       </td>
                       <td className="py-2 px-2.5 border-r border-slate-200 text-center font-mono font-semibold text-slate-800">
                         {perm.authorizedSpeedOs}
@@ -463,7 +481,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                       {tp.turnoutLengthM ?? '--'}
                     </td>
                     <td className="py-2.5 px-3 border-r border-slate-200 font-mono text-[11px] text-slate-800">
-                      {tp.psrSegments?.length > 0
+                      {tp.psrSegments && tp.psrSegments.length > 0
                         ? tp.psrSegments.map((s) => `(${s.staticSpeedType}, ${s.speedKmph}, ${s.lengthM}m)`).join(' · ')
                         : '--'}
                     </td>
@@ -519,7 +537,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                       {t.slNo || idx + 1}
                     </td>
                     <td className="py-2.5 px-3 border-r border-slate-200 font-semibold text-slate-900">
-                      {t.oheLineName}
+                      {t.oheLineName || t.oheLine}
                     </td>
                     <td className="py-2.5 px-3 border-r border-slate-200 font-mono font-semibold text-slate-900">
                       {t.entrySignal}
@@ -531,16 +549,16 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                       {t.tsrRouteId}
                     </td>
                     <td className="py-2.5 px-3 border-r border-slate-200 font-mono font-semibold text-amber-900">
-                      {t.startRfidTag}
+                      {t.startRfidTag || t.oheLineStartRfidTag}
                     </td>
                     <td className="py-2.5 px-3 border-r border-slate-200 text-right font-mono tabular-nums">
-                      {t.entrySignalDistFromStartTagM}
+                      {t.entrySignalDistFromStartTagM ?? t.entrySignalDistanceM ?? 0}
                     </td>
                     <td className="py-2.5 px-3 border-r border-slate-200 text-right font-mono tabular-nums">
-                      {t.lastPoleDistFromExitSignalM}
+                      {t.lastPoleDistFromExitSignalM ?? t.lastPoleDistanceM ?? 0}
                     </td>
                     <td className="py-2.5 px-3 font-mono text-[11px] text-slate-800 leading-relaxed">
-                      {t.ohePoleKmData}
+                      {t.ohePoleKmData || (t.ohePoles ? t.ohePoles.map((p) => `(${p.distanceM}-${p.poleId})`).join(', ') : '--')}
                     </td>
                   </tr>
                 ))}
@@ -660,13 +678,13 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                           {b.lastStopSignal}
                         </td>
                         <td className="py-2.5 px-3 border-r border-slate-200 text-right font-mono tabular-nums">
-                          {b.lastSignalMaMeters || 5230}
+                          {b.lastSignalMaMeters ?? '--'}
                         </td>
                         <td className="py-2.5 px-3 border-r border-slate-200 font-mono font-semibold text-blue-800">
                           {b.blockSectionTin}
                         </td>
                         <td className="py-2.5 px-3 border-r border-slate-200 text-slate-700">
-                          {b.direction || 'Down'}
+                          {b.direction || '--'}
                         </td>
                         <td className="py-2.5 px-3 border-r border-slate-200 font-mono text-slate-700">
                           {b.adjacentLineTins}
@@ -725,13 +743,7 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {(project.shuntingLimits || [
-                      { adjacentStation: project.metadata.nextDownStationId || 'GGD', direction: 'Nominal', rfidTag: 'R-716', tin: 'N-96', absoluteLocationM: 122790 },
-                      { adjacentStation: project.metadata.nextDownStationId || 'GGD', direction: 'Nominal', rfidTag: 'R-683', tin: 'N-91', absoluteLocationM: 122670 },
-                      { adjacentStation: project.metadata.nextDownStationId || 'GGD', direction: 'Nominal', rfidTag: 'R-687', tin: 'N-53', absoluteLocationM: 122240 },
-                      { adjacentStation: project.metadata.nextUpStationId || 'VKB', direction: 'Reverse', rfidTag: 'R-709', tin: 'N-94', absoluteLocationM: 121160 },
-                      { adjacentStation: project.metadata.nextUpStationId || 'VKB', direction: 'Reverse', rfidTag: 'R-690', tin: 'N-95', absoluteLocationM: 121280 },
-                    ]).map((s, idx) => (
+                    {(project.shuntingLimits || []).map((s, idx) => (
                       <tr key={`${s.rfidTag}-${idx}`} className="hover:bg-slate-50">
                         <td className="py-2.5 px-4 border-r border-slate-200 font-bold text-slate-900">
                           {s.adjacentStation}

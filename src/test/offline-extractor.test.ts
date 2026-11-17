@@ -84,4 +84,57 @@ describe('offline drawing extraction', () => {
     expect(metadata.nextUpStationId).toBe('503');
     expect(metadata.nextDownStationId).toBe('521');
   });
+
+  it('interpolates missing tag chainages from yard geometry and satisfies RDSO linking sum check', () => {
+    const tokens: LayoutToken[] = [
+      track(0, 400, 100),
+      text('DN', 26, 103.5), text('MAIN', 31, 103.5),
+      text('UP', 300, 20), text('DOWN', 320, 20),
+      text('R-101', 50, 102.8), text('120.000', 50, 105.2),
+      text('R-102', 150, 102.8), // NO chainage label beside R-102
+      text('R-103', 250, 102.8), text('120.200', 250, 105.2),
+      ring(58, 94), ring(60.6, 94), text('1D', 59, 91),
+      ring(258, 94), ring(260.6, 94), text('1', 259, 91),
+    ];
+    const project = extractOfflineProject({ fileName: 'test.pdf', sourceLayout, tokens });
+    const r102 = project.tags.find((t) => t.tagId === 'R-102');
+    expect(r102).toBeDefined();
+    expect(r102!.chainageM).toBe(120100);
+    expect(r102!.confidence).not.toBe('LOW');
+
+    expect(project.routes).toHaveLength(1);
+    const r = project.routes[0]!;
+    expect(r.distanceBetweenSignalsM).toBe(200);
+    const linkingSum = r.linkingSequence.reduce((sum, link) => sum + link.distanceM, 0);
+    expect(linkingSum).toBe(200);
+  });
+
+  it('does not create a phantom signal from a bare number near an en-route tag', () => {
+    const tokens: LayoutToken[] = [
+      track(0, 400, 100),
+      text('UP', 30, 20), text('MAIN', 50, 20),
+      text('R-201', 100, 102.8), text('120.000', 100, 105.2), text('N', 95, 100),
+      text('18', 105, 96),
+    ];
+    const project = extractOfflineProject({ fileName: 'test.pdf', sourceLayout, tokens });
+    expect(project.signals.some((s) => s.name === 'S18' || s.name === 'S8')).toBe(false);
+  });
+
+  it('preserves two-digit signal 30 and connects 30 ID to S30', () => {
+    const tokens: LayoutToken[] = [
+      track(0, 500, 100),
+      text('UP', 30, 20), text('MAIN', 50, 20),
+      text('R-301', 100, 102.8), text('122.000', 100, 105.2),
+      text('R-302', 300, 102.8), text('121.000', 300, 105.2),
+      ring(98, 94), ring(95.4, 94), text('30ID', 99, 91),
+      ring(298, 94), ring(295.4, 94), text('30', 299, 91),
+    ];
+    const project = extractOfflineProject({ fileName: 'test.pdf', sourceLayout, tokens });
+    const s30 = project.signals.find((s) => s.name === 'S30');
+    expect(s30).toBeDefined();
+    expect(project.signals.some((s) => s.name === 'S3' && s.direction === 'UP')).toBe(false);
+    const approachRoute = project.routes.find((r) => r.entrySignal === 'S30 ID');
+    expect(approachRoute).toBeDefined();
+    expect(approachRoute!.exitSignal).toBe('S30');
+  });
 });

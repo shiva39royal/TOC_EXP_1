@@ -7,17 +7,26 @@ import type { StationProject } from '@/types/signalling';
 
 const mockProject: StationProject = {
   id: 'proj-1',
+  tocFormatPreference: 'STANDARD_SELECTION',
   metadata: {
-    stationName: 'CHITGIDDA',
-    stationCode: 'CTF',
-    stationId: '520',
+    stationName: 'DEMO_STATION',
+    stationCode: 'DEMO',
+    stationId: '999',
+    division: 'TestDivision',
+    section: 'TestSection',
+    refToc: 'TC-DEMO',
+    version: '1.0',
+    preparedBy: 'SSE/Sig',
+    checkedBy: 'ASTE',
+    engineerSignedOff: false,
     chainageDirection: 'LEFT_INCREASING',
-    nextUpStationId: '503',
-    nextDownStationId: '521',
-    refSip: 'SIP-520',
-    refLayout: 'CTF-TOC-2024',
+    nextUpStationId: '998',
+    nextDownStationId: '1000',
+    refSip: 'SIP-999',
+    refLayout: 'DEMO-LAYOUT',
     tableFormatVersion: 'RDSO-SPN-196',
   },
+  blockSections: [],
   routes: [],
   signals: [],
   points: [],
@@ -28,7 +37,7 @@ const mockProject: StationProject = {
   auditLog: [],
   sourceLayout: {
     kind: 'PDF',
-    fileName: 'CTF_station.pdf',
+    fileName: 'station_layout.pdf',
     pageCount: 1,
     fileSize: 1024,
   },
@@ -49,17 +58,17 @@ describe('CAD Metadata & Station Info UI display', () => {
     // Verify allowed fields are visible
     expect(screen.getByText('CAD Metadata & Station Info')).toBeInTheDocument();
     expect(screen.getByText('Station Name')).toBeInTheDocument();
-    expect(screen.getByText('CHITGIDDA')).toBeInTheDocument();
+    expect(screen.getByText('DEMO_STATION')).toBeInTheDocument();
     expect(screen.getByText('Station Code')).toBeInTheDocument();
-    expect(screen.getByText('CTF')).toBeInTheDocument();
+    expect(screen.getByText('DEMO')).toBeInTheDocument();
     expect(screen.getByText('Station ID')).toBeInTheDocument();
-    expect(screen.getByText('520')).toBeInTheDocument();
+    expect(screen.getByText('999')).toBeInTheDocument();
     expect(screen.getByText('Chainage Direction')).toBeInTheDocument();
     expect(screen.getByText('← Inc. Left')).toBeInTheDocument();
     expect(screen.getByText('Left Adjacent')).toBeInTheDocument();
-    expect(screen.getByText('503')).toBeInTheDocument();
+    expect(screen.getByText('998')).toBeInTheDocument();
     expect(screen.getByText('Right Adjacent')).toBeInTheDocument();
-    expect(screen.getByText('521')).toBeInTheDocument();
+    expect(screen.getByText('1000')).toBeInTheDocument();
     expect(screen.getByText('Level Crossings')).toBeInTheDocument();
     expect(screen.getByText('1')).toBeInTheDocument();
 

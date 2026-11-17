@@ -20,7 +20,7 @@ export type TagFunctionType =
 
 export type ConfidenceLevel = 'HIGH' | 'MEDIUM' | 'LOW';
 
-export type TocFormatMode = 'CHITGIDDA_SELECTION' | 'JANKAMPET_TOC';
+export type TocFormatMode = 'STANDARD_SELECTION' | 'TCAS_TOC' | 'CHITGIDDA_SELECTION' | 'JANKAMPET_TOC';
 
 export interface StationMetadata {
   stationName: string;
@@ -28,18 +28,21 @@ export interface StationMetadata {
   stationId: string;
   division: string;
   section: string;
+  railwayZone?: string | undefined;
   refSip: string;
   refLayout: string;
   refToc: string;
   version: string;
+  tableFormatVersion?: string | undefined;
   chainageDirection: 'LEFT_INCREASING' | 'RIGHT_INCREASING' | 'UNKNOWN';
   nextDownStationId: string;
   nextUpStationId: string;
   preparedBy: string;
   checkedBy: string;
+  approvedBy?: string | undefined;
   engineerSignedOff: boolean;
-  signOffTimestamp?: string;
-  signOffEngineerName?: string;
+  signOffTimestamp?: string | undefined;
+  signOffEngineerName?: string | undefined;
 }
 
 export interface TrackLine {
@@ -138,10 +141,10 @@ export interface LevelCrossing {
   id: string;
   name: string;
   chainageM: number | null;
-  manningType: string;
-  lcClass: string;
-  autoWhistling: string;
-  closingCondition: string;
+  manningType?: string | undefined;
+  lcClass?: string | undefined;
+  autoWhistling?: string | undefined;
+  closingCondition?: string | undefined;
 }
 
 export interface LinkingTuple {
@@ -159,6 +162,7 @@ export interface RouteAspectPermutation {
   aspectOfEntrySignal: string;
   requiresAspectOfExitSignal: string;
   movementAuthoritySections: string;
+  authorizedSpeedSr?: string;
   authorizedSpeedOs: string;
 }
 
@@ -208,9 +212,11 @@ export interface TocRouteRow {
 }
 
 export interface ShuntingLimitEntry {
-  adjacentStationName: string;
+  adjacentStationName?: string;
+  adjacentStation?: string;
   direction: 'Nominal' | 'Reverse' | string;
-  rfidTagNo: string;
+  rfidTagNo?: string;
+  rfidTag?: string;
   tin: string;
   absoluteLocationM: number;
 }
@@ -232,36 +238,52 @@ export interface TrackProfileRow {
   exitSignal: string;
   line: string;
   turnoutSpeedKmph: number | null;
-  turnoutStartDistanceM: number | null;
+  turnoutStartDistanceM?: number | null | undefined;
+  turnoutStartDistM?: number | null | undefined;
   turnoutLengthM: number | null;
-  psrList: PsrSegment[];
-  engineeringGradients: GradientEntry[];
-  averageGradients: AverageGradientEntry[];
+  psrList?: PsrSegment[] | undefined;
+  psrSegments?: PsrSegment[] | undefined;
+  psrClassSegments?: Array<{ classA: number; classB: number; classC: number; lengthM: number }> | undefined;
+  engineeringGradients: Array<{ distanceM: number; gradientValue: string; lengthM: number }>;
+  averageGradients: Array<{ distanceM: number; avgGradientValue: string; lengthM: number }>;
+  lcId?: string | undefined;
+  lcDistanceM?: number | undefined;
+  lcManningType?: string | undefined;
+  lcClass?: string | undefined;
+  lcAutoWhistlingType?: string | undefined;
+  trackConditionType?: string | undefined;
+  trackConditionStartDistM?: number | undefined;
+  trackConditionLengthM?: number | undefined;
   lcGate?: {
     id: string;
     distanceM: number;
     manningType: string;
     lcClass: string;
     autoWhistling: string;
-  };
+  } | undefined;
   trackCondition?: {
     type: string;
     startDistanceM: number;
     lengthM: number;
-    description?: string;
-  };
+    description?: string | undefined;
+  } | undefined;
 }
 
 export interface TsrRouteRow {
   slNo: number;
   oheLine: string;
+  oheLineName?: string | undefined;
   entrySignal: string;
   exitSignal: string;
   oheLineStartRfidTag: string;
+  startRfidTag?: string | undefined;
   tsrRouteId: string;
   entrySignalDistanceM: number;
+  entrySignalDistFromStartTagM?: number | undefined;
   lastPoleDistanceM: number;
+  lastPoleDistFromExitSignalM?: number | undefined;
   ohePoles: Array<{ poleId: string; distanceM: number }>;
+  ohePoleKmData?: string | undefined;
 }
 
 export interface TslRouteRow {
@@ -269,12 +291,14 @@ export interface TslRouteRow {
   tslEntrySignal: string;
   tslExitSignal: string;
   signalType: string;
+  lineOrSignalType?: string | undefined;
   aspectOfEntrySignal: string;
   requiresAspectOfExitSignal: string;
   requiredRouteCommand: string;
   pointsNormal: string[];
   pointsReverse: string[];
   requiresTrackCktUp: string;
+  trackCktUpOrAxleCounterFree?: string | undefined;
   tinsRequiresFree: string[];
   entryFootTag: string;
   linkingSequence: LinkingTuple[];
@@ -293,10 +317,10 @@ export interface BlockSectionDetail {
   startDistAbsResetM: string;
   absLocationCorrectionM: string;
   locoDirectionAfterAdj: string;
-  sosRfidTags?: string[];
-  lastSignalMaMeters?: number;
-  direction?: 'UP' | 'Down' | string;
-  authorisedSpeed?: string;
+  sosRfidTags?: string[] | undefined;
+  lastSignalMaMeters?: number | undefined;
+  direction?: 'UP' | 'Down' | string | undefined;
+  authorisedSpeed?: string | undefined;
 }
 
 export interface ValidationIssue {
@@ -325,13 +349,14 @@ export interface AuditEntry {
 export interface SourceLayoutAsset {
   kind: 'DWG' | 'DXF' | 'PDF';
   fileName: string;
+  fileSize?: number | undefined;
   dxfData?: unknown;
-  pdfBase64?: string;
-  pageCount?: number;
-  layerCount?: number;
-  blockCount?: number;
-  entityCount?: number;
-  cadVersion?: string;
+  pdfBase64?: string | undefined;
+  pageCount?: number | undefined;
+  layerCount?: number | undefined;
+  blockCount?: number | undefined;
+  entityCount?: number | undefined;
+  cadVersion?: string | undefined;
 }
 
 export interface StationProject {
@@ -345,6 +370,7 @@ export interface StationProject {
   levelCrossings: LevelCrossing[];
   routes: TocRouteRow[];
   blockSections: BlockSectionDetail[];
+  tslBlockSections?: BlockSectionDetail[];
   trackProfiles?: TrackProfileRow[];
   tsrRoutes?: TsrRouteRow[];
   tslRoutes?: TslRouteRow[];

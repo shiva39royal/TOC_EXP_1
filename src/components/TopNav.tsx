@@ -11,7 +11,7 @@ interface TopNavProps {
 const NAV_ITEMS: { id: WorkspaceTab; label: string }[] = [
   { id: 'schematic', label: 'Track Schematic' },
   { id: 'inventory', label: 'Extracted Data' },
-  { id: 'validation', label: 'Validation' },
+  { id: 'validation', label: 'Engineer Validation' },
   { id: 'toc', label: 'TOC Output' },
 ];
 

@@ -188,7 +188,7 @@ export const TrackSchematicView: React.FC<TrackSchematicViewProps> = ({
                       type="text"
                       value={editName}
                       onChange={(e) => setEditName(e.target.value)}
-                      placeholder="e.g. CHITGIDDA"
+                      placeholder="e.g. STATION NAME"
                       className="w-full px-2 py-1 text-xs border border-slate-300 rounded bg-white font-medium focus:outline-none focus:border-blue-600"
                     />
                   </div>
@@ -198,7 +198,7 @@ export const TrackSchematicView: React.FC<TrackSchematicViewProps> = ({
                       type="text"
                       value={editCode}
                       onChange={(e) => setEditCode(e.target.value.toUpperCase())}
-                      placeholder="e.g. CTF"
+                      placeholder="e.g. STN"
                       className="w-full px-2 py-1 text-xs border border-slate-300 rounded bg-white font-mono uppercase focus:outline-none focus:border-blue-600"
                     />
                   </div>

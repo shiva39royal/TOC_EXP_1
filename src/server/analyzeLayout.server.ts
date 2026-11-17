@@ -359,14 +359,15 @@ function synthesizeRoutesIfEmpty(
 
     for (let i = 0; i < ordered.length; i++) {
       const entry = ordered[i];
-      if (/distant|adjacent|shunt/i.test(entry.signalType)) continue;
-      if (/advance/i.test(entry.signalType)) continue;
+      if (/adjacent|shunt/i.test(entry.signalType)) continue;
 
+      const isDistant = /distant/i.test(entry.signalType) || /D$|ID$/i.test(entry.name);
+      const isAdvStarter = /advance/i.test(entry.signalType);
       const isHome = /home|routing/i.test(entry.signalType);
-      const isStarter = /starter/i.test(entry.signalType) && !/advance/i.test(entry.signalType);
+      const isStarter = /starter/i.test(entry.signalType) && !isAdvStarter;
+      const isIb = /ib/i.test(entry.signalType);
 
       const forwardSignals = ordered.filter((cand) => {
-        if (/distant/i.test(cand.signalType)) return false;
         if (cand.id === entry.id || cand.name === entry.name) return false;
         return increasingChainage
           ? cand.chainageM > entry.chainageM + 30
@@ -374,7 +375,11 @@ function synthesizeRoutesIfEmpty(
       });
 
       let targetExits: typeof ordered = [];
-      if (isHome) {
+      if (isDistant) {
+        // Distant targets Inner Distant or Home
+        const distOrHome = forwardSignals.filter((s) => /inner\s*distant/i.test(s.signalType) || /home/i.test(s.signalType));
+        targetExits = distOrHome.length > 0 ? distOrHome.slice(0, 1) : forwardSignals.slice(0, 1);
+      } else if (isHome) {
         const starters = forwardSignals.filter(
           (s) => /starter/i.test(s.signalType) && !/advance/i.test(s.signalType)
         );
@@ -392,6 +397,11 @@ function synthesizeRoutesIfEmpty(
       } else if (isStarter) {
         const advStarters = forwardSignals.filter((s) => /advance/i.test(s.signalType));
         targetExits = advStarters.length > 0 ? [advStarters[0]] : forwardSignals.slice(0, 1);
+      } else if (isAdvStarter) {
+        const ibs = forwardSignals.filter((s) => /ib/i.test(s.signalType));
+        if (ibs.length > 0) {
+          targetExits = [ibs[0]];
+        }
       } else {
         targetExits = forwardSignals.slice(0, 1);
       }
@@ -458,6 +468,20 @@ function synthesizeRoutesIfEmpty(
         const entryAsp = isDiverging ? 'Yellow with Route' : (entry.aspects?.[0] || 'Green');
         const exitAsp = isDiverging ? `${exit.name} Yellow` : (exit.aspects?.[0] || `${exit.name} Green`);
 
+        const computeRouteLocking = (entryName: string, sigType: string): string => {
+          if (/distant|ib|advance/i.test(sigType) || /D$|ID$/i.test(entryName)) return '--';
+          const clean = entryName.replace(/[^0-9A-Z]/g, '');
+          const match = clean.match(/^([A-Z]*)(\d+)([A-Z]*)$/);
+          if (!match) return '--';
+          const num = match[2];
+          const suffix = match[3];
+          if (suffix === 'A' || /calling/i.test(sigType)) return `${num}AASR`;
+          return `${num}ASR`;
+        };
+
+        const authSpeedSr = /calling/i.test(entry.signalType) ? '1' : (isDiverging ? '15' : 'MPS');
+        const authSpeedOs = /distant|advance/i.test(entry.signalType) ? 'MPS' : '15';
+
         synthesized.push({
           slNo: sl++,
           entrySignal: entry.name,
@@ -471,7 +495,7 @@ function synthesizeRoutesIfEmpty(
           requiresAspectOfExitSignal: exitAsp,
           entryAspectSummary: (entry.aspects ?? []).join('/') || entryAsp,
           exitAspectsSummary: (exit.aspects ?? []).join('/') || exitAsp,
-          requiredRouteLocking: entry.routeLockingPrefix || `${entry.name.replace(/[^0-9]/g, '')}GNR`,
+          requiredRouteLocking: entry.routeLockingPrefix || computeRouteLocking(entry.name, entry.signalType),
           pointsNormal,
           pointsReverse,
           trackCktUp: exit.trackCircuit || routeTrack?.trackCircuit || '-',
@@ -490,8 +514,8 @@ function synthesizeRoutesIfEmpty(
           distanceBetweenSignalsM: distM,
           movementAuthoritySections: isDiverging ? '2' : '4',
           movementAuthorityMeters: `${distM}m`,
-          authorizedSpeedSr: isDiverging ? '30' : 'MPS',
-          authorizedSpeedOs: isDiverging ? '30' : 'MPS',
+          authorizedSpeedSr: authSpeedSr,
+          authorizedSpeedOs: authSpeedOs,
           averageGradient: 'F 1 in 727',
           isTsl: false,
           engineerStatus: 'NEEDS_REVIEW',
@@ -512,15 +536,15 @@ const extractionSchema = {
       properties: {
         stationName: {
           type: Type.STRING,
-          description: 'Exact Station or Section Name from title block / header (e.g., CHITGIDDA, JANKAMPET JN, LC-49 (UJP-SPJ) / UJIARPUR). Return "--" only if truly illegible.',
+          description: 'Exact Station or Section Name from title block / header. Return "--" only if truly illegible.',
         },
         stationCode: {
           type: Type.STRING,
-          description: '2-5 uppercase letter Station Alpha Code from sheet/title block (e.g., CTF, JKM, UJP, SPJ).',
+          description: '2-5 uppercase letter Station Alpha Code from sheet/title block.',
         },
         stationId: {
           type: Type.STRING,
-          description: 'Numeric KAVACH/TCAS Station ID or LCU ID from title block / RFID allotment table (e.g., 520, 01014, 47151, 47150).',
+          description: 'Numeric KAVACH/TCAS Station ID or LCU ID from title block / RFID allotment table.',
         },
         division: { type: Type.STRING },
         section: { type: Type.STRING },
@@ -531,11 +555,11 @@ const extractionSchema = {
         chainageDirection: { type: Type.STRING, description: 'LEFT_INCREASING or RIGHT_INCREASING' },
         nextDownStationId: {
           type: Type.STRING,
-          description: 'Adjacent station ID & code in Down direction from layout arrow (e.g., 521 (GGD), 47150 (UJP), 01015 (NVT)).',
+          description: 'Adjacent station ID & code in Down direction from layout arrow.',
         },
         nextUpStationId: {
           type: Type.STRING,
-          description: 'Adjacent station ID & code in Up direction from layout arrow (e.g., 503 (VKB), SPJ, 01013 (NZB)).',
+          description: 'Adjacent station ID & code in Up direction from layout arrow.',
         },
       },
       required: ['stationName', 'stationCode', 'stationId'],
@@ -729,7 +753,7 @@ export async function analyzeLayoutRequest(body: {
   files?: UploadedFilePayload[];
   provider?: AiExtractionProvider;
   apiKey?: string;
-  tocFormatPreference?: 'CHITGIDDA_SELECTION' | 'JANKAMPET_TOC';
+  tocFormatPreference?: 'STANDARD_SELECTION' | 'TCAS_TOC' | 'CHITGIDDA_SELECTION' | 'JANKAMPET_TOC';
   stationHint?: string;
   omitPdfResponse?: boolean;
 }): Promise<{ status: number; payload: Record<string, unknown> }> {
@@ -738,7 +762,7 @@ export async function analyzeLayoutRequest(body: {
       files,
       provider,
       apiKey,
-      tocFormatPreference = 'CHITGIDDA_SELECTION',
+      tocFormatPreference = 'STANDARD_SELECTION',
       stationHint,
       omitPdfResponse,
     } = body;
@@ -1380,7 +1404,7 @@ ${cadSummaries.join('\n\n')}`;
 
     const projectPayload = {
       id: `upload-${Date.now()}`,
-      tocFormatPreference: tocFormatPreference || 'CHITGIDDA_SELECTION',
+      tocFormatPreference: tocFormatPreference || 'STANDARD_SELECTION',
       metadata: {
         stationName: resolvedStationName,
         stationCode: resolvedStationCode,

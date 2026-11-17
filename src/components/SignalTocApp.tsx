@@ -333,22 +333,12 @@ export default function App() {
                     : 'border-slate-200 hover:bg-slate-50'
                 }`}
               >
-                <div className="text-xs font-medium text-slate-500">03. Engineering Validation</div>
-                <div className="text-sm font-mono tabular-nums font-semibold mt-1">
-                  <span className={openErrors > 0 ? 'text-red-700' : 'text-emerald-700'}>
-                    {openErrors} Errors
-                  </span>
-                  <span className="text-slate-400 mx-1.5">·</span>
-                  <span className={openWarnings > 0 ? 'text-amber-700' : 'text-slate-700'}>
-                    {openWarnings} Warnings
-                  </span>
+                <div className="text-xs font-medium text-slate-500">03. Engineer Validation</div>
+                <div className="text-sm font-mono tabular-nums font-semibold text-slate-900 mt-1">
+                  {activeProject.routes.length} Routes Configured
                 </div>
                 <div className="text-xs text-slate-600 mt-1">
-                  {activeProject.metadata.engineerSignedOff
-                    ? 'Engineer Verified'
-                    : openErrors === 0 && openWarnings === 0
-                      ? 'Ready for Sign-Off'
-                      : 'Requires Signalling Review'}
+                  Editable Preview &amp; Verification
                 </div>
               </button>
 
@@ -421,6 +411,11 @@ export default function App() {
             filterRouteSlNo={validationRouteFilter}
             onClearRouteFilter={() => setValidationRouteFilter(null)}
             onResolveIssue={handleResolveIssue}
+            onUpdateRoute={handleUpdateRoute}
+            onUpdateMetadata={handleUpdateMetadata}
+            onSaveAndProceed={() => {
+              setActiveTab('toc');
+            }}
             onInspectRouteOnSchematic={(slNo) => {
               setSelectedRouteSlNo(slNo);
               setActiveTab('schematic');

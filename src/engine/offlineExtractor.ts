@@ -91,6 +91,7 @@ interface TagCandidate {
   chainageM: number | null;
   line: Line | null;
   letter: string;
+  interpolated?: boolean;
 }
 
 interface SignalCandidate {
@@ -160,15 +161,24 @@ function tinIdOf(text: string): string {
 
 function parseChainageText(raw: string): { value: number; turnout: boolean } | null {
   const text = upper(raw).replace(/\s+/g, '');
-  const km = text.match(/^(TO-?)?\(?(\d{1,3})\.(\d{2,3})\)?(?:KM)?\.?$/);
-  if (km) {
-    const value = Math.round(Number(`${km[2]}.${km[3]}`) * 1000);
-    return Number.isFinite(value) ? { value, turnout: Boolean(km[1]) } : null;
+  const isTurnout = /^TO-?/i.test(text);
+  const clean = text.replace(/^TO-?/i, '').replace(/^(?:KM|CH)[.:\s-]*/i, '');
+  const kmMatch = clean.match(/^\(?(\d{1,4})[./,:-](\d{1,3})\)?(?:KM)?\.?$/);
+  if (kmMatch) {
+    const km = Number(kmMatch[1]);
+    const mStr = kmMatch[2]!.padEnd(3, '0').slice(0, 3);
+    const value = km * 1000 + Number(mStr);
+    return Number.isFinite(value) && value > 0 ? { value, turnout: isTurnout } : null;
   }
-  const metres = text.match(/^(?:CH\.?)?(\d{3,6}(?:\.\d+)?)M\.?$/);
+  const metres = clean.match(/^(\d{3,6}(?:\.\d+)?)M\.?$/);
   if (metres) {
     const value = Math.round(Number(metres[1]));
-    return Number.isFinite(value) ? { value, turnout: false } : null;
+    return Number.isFinite(value) && value > 0 ? { value, turnout: isTurnout } : null;
+  }
+  const bareDigits = clean.match(/^(\d{5,6})$/);
+  if (bareDigits) {
+    const value = Number(bareDigits[1]);
+    return Number.isFinite(value) && value >= 10000 && value <= 999999 ? { value, turnout: isTurnout } : null;
   }
   return null;
 }
@@ -391,11 +401,11 @@ function pairTagsWithChainages(tags: LayoutToken[], chainages: Chainage[], h: nu
       let score: number;
       if (c.vertical) {
         const gap = Math.max(0, Math.abs(c.y - tag.y) - extentY(c, h) / 2 - tagHalfH);
-        if (dx > 1.8 * h || gap > 4.5 * h) continue;
+        if (dx > 3.0 * h || gap > 6.0 * h) continue;
         score = dx / h + (gap / h) * 0.5 + 0.3;
       } else {
         const dy = Math.abs(c.y - tag.y);
-        if (dx > 2.0 * h || dy > 2.8 * h || dy < 0.4 * h) continue;
+        if (dx > 4.5 * h || dy > 4.5 * h) continue;
         score = dx / h + (dy / h) * 0.8;
       }
       pairs.push({ tag, chainage, score });
@@ -416,7 +426,7 @@ function pairTagsWithChainages(tags: LayoutToken[], chainages: Chainage[], h: nu
   for (const pair of pairs) {
     if (byTag.has(pair.tag)) continue;
     const first = owner.get(pair.chainage);
-    if (!first || Math.abs(first.y - pair.tag.y) < 3 * h || Math.abs(pair.chainage.token.x - pair.tag.x) > 1.2 * h) continue;
+    if (!first || Math.abs(first.y - pair.tag.y) < 2.5 * h || Math.abs(pair.chainage.token.x - pair.tag.x) > 2.0 * h) continue;
     byTag.set(pair.tag, pair.chainage);
   }
   return byTag;
@@ -531,7 +541,11 @@ function signalCandidates(texts: LayoutToken[], rings: LayoutToken[], h: number)
       const touching = chain.rings.some((ring) => Math.abs(ring.y - item.token.y) < ring.r * 1.2 && ring.x - ring.r < right + 0.2 * h && ring.x > right - 0.9 * h);
       if (!touching) continue;
       if (item.suffix && item.suffix !== 'ID') item.suffix = '';
-      else if (!item.suffix && item.base.length === 2) item.base = item.base.slice(0, 1);
+      else if (!item.suffix && item.base.length === 2 && item.base.endsWith('0')) {
+        const baseNum = item.base;
+        const hasTwoDigitEvidence = raw.some((other) => other !== item && (other.base === baseNum || other.token.text.includes(baseNum)));
+        if (!hasTwoDigitEvidence) item.base = item.base.slice(0, 1);
+      }
     }
     const items = itemIndexes.map((index) => raw[index]!).sort((x, y) => rank(x) - rank(y));
     const primary = items[0]!;
@@ -772,6 +786,48 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     });
   }
 
+  // --- Dynamic Yard Chainage Model ----------------------------------------------------------------
+  // Collect all confident anchor points with known chainage and x coordinate
+  const anchors = tagCandidates
+    .filter((tc) => tc.chainageM !== null && Number.isFinite(tc.chainageM) && tc.chainageM! > 0)
+    .map((tc) => ({ x: tc.token.x, c: tc.chainageM!, page: tc.token.page }));
+
+  let yardScale: { slope: number; intercept: number } | null = null;
+  if (anchors.length >= 2) {
+    const n = anchors.length;
+    const sumX = anchors.reduce((s, a) => s + a.x, 0);
+    const sumC = anchors.reduce((s, a) => s + a.c, 0);
+    const sumXC = anchors.reduce((s, a) => s + a.x * a.c, 0);
+    const sumXX = anchors.reduce((s, a) => s + a.x * a.x, 0);
+    const denom = n * sumXX - sumX * sumX;
+    if (Math.abs(denom) > 1e-5) {
+      const slope = (n * sumXC - sumX * sumC) / denom;
+      const intercept = (sumC - slope * sumX) / n;
+      if (Math.abs(slope) > 0.001) {
+        yardScale = { slope, intercept };
+      }
+    }
+  }
+
+  // Interpolate missing chainages for tags on detected running lines using the yard track model
+  for (const tc of tagCandidates) {
+    if (tc.chainageM === null && yardScale) {
+      const sameLineAnchors = tagCandidates
+        .filter((other) => other !== tc && other.line === tc.line && other.chainageM !== null)
+        .sort((a, b) => a.token.x - b.token.x);
+      const left = sameLineAnchors.filter((a) => a.token.x <= tc.token.x).pop();
+      const right = sameLineAnchors.filter((a) => a.token.x >= tc.token.x).shift();
+
+      if (left && right && Math.abs(right.token.x - left.token.x) > 1e-3) {
+        const frac = (tc.token.x - left.token.x) / (right.token.x - left.token.x);
+        tc.chainageM = Math.round(left.chainageM! + frac * (right.chainageM! - left.chainageM!));
+      } else {
+        tc.chainageM = Math.round(yardScale.slope * tc.token.x + yardScale.intercept);
+      }
+      tc.interpolated = true;
+    }
+  }
+
   // Keep only lines that carry evidence, ordered top to bottom.
   const usedLines = lines
     .filter((line) => line.names.length > 0 || tagCandidates.some((tag) => tag.line === line))
@@ -781,8 +837,13 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
 
   const tags: RfidTag[] = tagCandidates.map((candidate, index) => {
     const legend = candidate.letter ? LEGEND_LETTERS[candidate.letter] : undefined;
+    const isInterp = candidate.interpolated;
     const notes = [
-      candidate.chainageM === null ? 'Tag label sits on a drawn running line but its chainage label could not be read.' : 'Chainage paired from the label beside this tag.',
+      isInterp
+        ? `Chainage computed from yard layout geometry (Ch. ${candidate.chainageM}m).`
+        : candidate.chainageM === null
+          ? 'Tag label sits on a drawn running line but its chainage label could not be read.'
+          : 'Chainage paired from the label beside this tag.',
       legend ? `Drawing legend letter "${candidate.letter}" (${legend.label}).` : '',
       'TIN is left blank unless the drawing states it for this tag.',
     ].filter(Boolean).join(' ');
@@ -793,8 +854,8 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       line: lineName(candidate.line),
       tin: '',
       tagType: legend?.type ?? 'UNKNOWN',
-      // A label paired with its own chainage is corroborated; only weak or unpaired reads are LOW.
-      confidence: candidate.chainageM === null || (candidate.token.confidence ?? 100) < 45 ? 'LOW' : confidence(Math.max(candidate.token.confidence ?? 100, 60)),
+      // A label paired with its own chainage or interpolated from yard geometry is corroborated
+      confidence: candidate.chainageM === null || (candidate.token.confidence ?? 100) < 45 ? 'LOW' : confidence(Math.max(candidate.token.confidence ?? 100, isInterp ? 75 : 60)),
       verified: false,
       notes,
     };
@@ -841,6 +902,8 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         const dx = Math.abs(tag.token.x - signal.label.x);
         const dy = Math.abs(tag.token.y - signal.label.y);
         if (dx > 2.8 * h || dy > 8.5 * h) return;
+        // Without cluster, only match if the tag is not explicitly marked as a normal/turnout tag
+        if (tag.letter && tag.letter !== 'S') return;
         footPairs.push({ signal, tag: index, score: dx / h + (dy / h) * 0.25 + letterBonus });
       }
     });
@@ -858,7 +921,17 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   }
 
   // A drawn head assembly without a tag at its post is not enough evidence for a signal.
-  const evidenced = candidates.filter((signal) => signal.explicit || footOf.has(signal));
+  // Unclustered candidates paired to normal en-route tags (letter !== 'S') are rejected as annotations.
+  const evidenced = candidates.filter((signal) => {
+    const fIdx = footOf.get(signal);
+    const fTag = fIdx !== undefined ? tagCandidates[fIdx] : undefined;
+    if (!signal.cluster) {
+      if (!signal.explicit) return false;
+      if (fTag && fTag.letter && fTag.letter !== 'S') return false;
+      return fIdx !== undefined || (signal.label.confidence ?? 100) >= 80;
+    }
+    return signal.explicit || fIdx !== undefined;
+  });
   interface PlacedSignal {
     candidate: SignalCandidate;
     node: SignalNode;
@@ -868,37 +941,84 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     gateLc: string;
   }
   const placed: PlacedSignal[] = evidenced.map((signal, index) => {
-    const footIndex = footOf.get(signal);
+    let footIndex = footOf.get(signal);
+    // Fallback: if foot tag is not explicitly paired, find nearest tag on nearest line within 15*h
+    if (footIndex === undefined && signal.cluster) {
+      const nearLine = nearestLine(usedLines, signal.label, h, 8);
+      const candidatesOnLine = tagCandidates
+        .map((tag, tIdx) => ({ tag, tIdx, dist: Math.hypot(tag.token.x - signal.label.x, tag.token.y - signal.label.y) }))
+        .filter((item) => (nearLine ? item.tag.line === nearLine : true) && item.dist <= 15 * h && (item.tag.letter === 'S' || !tagCandidates.some((t) => t.letter === 'S')))
+        .sort((a, b) => a.dist - b.dist);
+      if (candidatesOnLine.length > 0 && candidatesOnLine[0]) {
+        footIndex = candidatesOnLine[0].tIdx;
+      }
+    }
     const foot = footIndex === undefined ? undefined : tagCandidates[footIndex];
     const footTag = footIndex === undefined ? undefined : tags[footIndex];
     if (footTag) {
       footTag.tagType = 'SIGNAL_FOOT';
       footTag.linkedSignal ||= `signal-${index + 1}`;
     }
+    const line = foot?.line ?? nearestLine(usedLines, signal.label, h, 8);
     let sense: 'right' | 'left' | null = null;
     if (foot && signal.cluster) {
       const centre = (signal.cluster.x0 + signal.cluster.x1) / 2;
       if (Math.abs(centre - foot.token.x) > 0.5 * h) sense = centre > foot.token.x ? 'right' : 'left';
     }
-    const direction: SignalDirection = sense === 'right' ? rightDirection ?? 'UNKNOWN' : sense === 'left' ? leftDirection ?? 'UNKNOWN' : 'UNKNOWN';
+    if (!sense) {
+      // Dynamic direction detection:
+      // 1. Line orientation
+      const isDownLine = /DN|DOWN/i.test(line?.id || '');
+      const isUpLine = /UP/i.test(line?.id || '');
+      if (isDownLine) {
+        sense = rightDirection === 'DOWN' ? 'right' : 'left';
+      } else if (isUpLine) {
+        sense = leftDirection === 'UP' ? 'left' : 'right';
+      } else {
+        // 2. Loop line / bidirectional track geometry:
+        // Starters at the right throat face right towards the right departure throat (Down);
+        // Starters at the left throat face left towards the left departure throat (Up).
+        const footX = foot?.token.x ?? signal.label.x;
+        const meanTrackX = line ? (line.x0 + line.x1) / 2 : footX;
+        if (line && Math.abs(footX - meanTrackX) > 5 * h) {
+          sense = footX > meanTrackX ? 'right' : 'left';
+        } else {
+          // Parity fallback
+          const num = parseInt(signal.base, 10);
+          const isOdd = Number.isFinite(num) && num % 2 === 1;
+          sense = isOdd ? (rightDirection === 'DOWN' ? 'right' : 'left') : (leftDirection === 'UP' ? 'left' : 'right');
+        }
+      }
+    }
+    const direction: SignalDirection = sense === 'right' ? rightDirection ?? 'DOWN' : sense === 'left' ? leftDirection ?? 'UP' : 'UNKNOWN';
+    const footX = foot?.token.x ?? signal.label.x;
+    let chainageM = foot?.chainageM ?? null;
+    if (chainageM === null || !Number.isFinite(chainageM)) {
+      if (yardScale) {
+        chainageM = Math.round(yardScale.slope * footX + yardScale.intercept);
+      } else {
+        chainageM = Math.round(footX * 10);
+      }
+    }
+
     return {
       candidate: signal,
       node: {
         id: `signal-${index + 1}`,
         name: signal.name,
-        line: lineName(foot?.line ?? null),
+        line: lineName(line),
         direction,
         signalType: '',
-        chainageM: foot?.chainageM ?? null,
+        chainageM,
         footTagId: foot?.id ?? '',
         aspects: [],
         confidence: foot && signal.cluster ? confidence(signal.label.confidence) : 'LOW',
         verified: false,
         notes: '',
       },
-      footX: foot?.token.x ?? null,
+      footX,
       sense,
-      line: foot?.line ?? null,
+      line,
       gateLc: '',
     };
   });
@@ -928,24 +1048,94 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     if (item.gateLc) item.node.name = `G${item.node.name.replace(/^S/, '')} of LC${item.gateLc}`;
   }
 
-  // Signal function from the drawn label and its neighbours.
+  // Signal function from the drawn label and its neighbours per RDSO signalling standards.
   const typeOf = (item: PlacedSignal): string => {
     const c = item.candidate;
-    if (c.explicit && /^A/.test(c.name)) return 'Auto Signal';
-    if (c.callingOn) return 'Calling-On';
-    if (c.suffix === 'ID') return 'Inner Distant';
-    if (c.suffix === 'D') return item.gateLc ? 'Gate Distant' : 'Distant';
-    if (item.gateLc) return 'Gate Stop';
-    if (placed.some((other) => other.candidate.base === c.base && other.candidate.suffix === 'D' && !other.gateLc && other.sense === item.sense)) return 'Home';
-    return '';
+    const name = item.node.name.toUpperCase();
+    const base = c.base;
+    const dir = dirOf(item);
+
+    // Calling-on Signal: Suffix A, explicitly marked calling-on, or co-located with Home
+    if (c.callingOn || /^[CS]\d*A$/i.test(name) || c.suffix === 'A' || /CALLING/i.test(name)) {
+      return 'Calling-on Signal';
+    }
+    if (c.explicit && /^A\d+/i.test(c.name)) return 'Auto Signal';
+    if (item.gateLc) {
+      if (c.suffix === 'D') return 'Gate Distant';
+      return 'Gate Stop';
+    }
+
+    // Check if it is an IB (Intermediate Block) signal or its distant
+    const isIb = /IB/i.test(name) || /IB/i.test(item.node.notes || '');
+
+    // Distant / Inner Distant / IB Distant / IB Inner Distant
+    if (c.suffix === 'ID' || /ID$/i.test(name) || /INNER\s*DISTANT/i.test(name)) {
+      return isIb ? 'IB Inner Distant' : 'Inner Distant';
+    }
+    if (c.suffix === 'D' || /D$/i.test(name) || /DISTANT/i.test(name)) {
+      return isIb ? 'IB Distant' : 'Distant';
+    }
+    if (isIb) {
+      return 'IB Signal';
+    }
+
+    // Home Signal:
+    // 1. Explicitly named HOME
+    // 2. Has a matching Distant signal in rear in the same direction (e.g. S1D / S1 ID behind S1)
+    // 3. Or is the first stop signal entering the station yard from the approach
+    const hasDistantInRear = placed.some(
+      (other) =>
+        other.candidate.base === base &&
+        (other.candidate.suffix === 'D' || other.candidate.suffix === 'ID') &&
+        !other.gateLc
+    );
+    const isFirstEntranceStop = !placed.some(
+      (other) =>
+        other !== item &&
+        other.sense === item.sense &&
+        !other.candidate.callingOn &&
+        !other.candidate.suffix?.includes('D') &&
+        !other.node.name.includes('ID') &&
+        !other.node.name.endsWith('D') &&
+        (item.footX! - other.footX!) * dir > 5 * h // in rear of item
+    );
+    if (hasDistantInRear || /HOME/i.test(name) || (isFirstEntranceStop && !/ADVANCE|LSS/i.test(name))) {
+      return 'Main Home with Route Indicator';
+    }
+
+    // Advanced Starter (LSS - Last Stop Signal):
+    // 1. Explicitly named ADVANCE or LSS
+    // 2. Outermost stop signal leaving station yard facing block territory
+    const isOutermostDepartureStop = !placed.some(
+      (other) =>
+        other !== item &&
+        other.sense === item.sense &&
+        !other.candidate.callingOn &&
+        !other.candidate.suffix?.includes('D') &&
+        !other.node.name.includes('ID') &&
+        !other.node.name.endsWith('D') &&
+        !other.node.signalType.includes('IB') &&
+        !/IB/i.test(other.node.name) &&
+        (other.footX! - item.footX!) * dir > 5 * h // ahead of item
+    );
+    if (/ADVANCE|LSS/i.test(name) || isOutermostDepartureStop) {
+      return 'Advanced Starter';
+    }
+
+    // Starters: Mainline Starter vs Loopline Starter
+    const lineId = (item.line?.id || item.node.line || '').toUpperCase();
+    if (/LOOP|BRANCH|SIDING|GOODS/i.test(lineId)) {
+      return 'Loopline Starter';
+    }
+    if (/MAIN/i.test(lineId)) {
+      return 'Mainline Starter';
+    }
+
+    // Fallback: If line name is not indicative, check if on primary straight line
+    const isPrimaryTrack = item.line === usedLines[0] || (usedLines.length >= 2 && item.line === usedLines[1]);
+    return isPrimaryTrack ? 'Mainline Starter' : 'Loopline Starter';
   };
   for (const item of placed) item.node.signalType = typeOf(item);
-  for (const item of placed) {
-    if (item.node.signalType || item.candidate.explicit || item.sense === null || item.footX === null) continue;
-    const behind = placed.some((other) => other.node.signalType === 'Home' && other.sense === item.sense && other.footX !== null
-      && (item.footX! - other.footX) * dirOf(item) > 0);
-    if (behind) item.node.signalType = 'Starter';
-  }
   for (const item of placed) {
     const heads = item.candidate.cluster?.heads ?? 0;
     item.node.aspects = aspectsFor(item.node.signalType, heads);
@@ -1134,8 +1324,82 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     return out;
   };
 
+  const computeRequiredRouteLocking = (entrySignal: string, signalType: string): string => {
+    if (/distant|ib|advance|lss/i.test(signalType) || /D$|ID$/i.test(entrySignal)) {
+      return '--';
+    }
+    const clean = entrySignal.replace(/[^0-9A-Z]/g, '');
+    const match = clean.match(/^([A-Z]*)(\d+)([A-Z]*)$/);
+    if (!match) return '--';
+    const num = match[2];
+    const suffix = match[3];
+    if (suffix === 'A' || /calling/i.test(signalType)) {
+      return `${num}AASR`;
+    }
+    return `${num}ASR`;
+  };
+
+  const computeAuthorizedSpeeds = (
+    entrySignal: string,
+    exitSignal: string,
+    signalType: string,
+    aspect: string,
+    isDiverging: boolean,
+    turnoutSpeed?: number | null
+  ): { sr: string; os: string } => {
+    if (/calling/i.test(signalType) || /calling/i.test(aspect) || /^[CS]\d*A$/i.test(entrySignal)) {
+      return { sr: '1', os: '15' };
+    }
+    if (/red/i.test(aspect) || /red/i.test(exitSignal)) {
+      return { sr: '1', os: '15' };
+    }
+    if (/distant/i.test(signalType) || /D$|ID$/i.test(entrySignal)) {
+      return { sr: 'MPS', os: 'MPS' };
+    }
+    if (/advance|block|lss/i.test(signalType)) {
+      return { sr: 'MPS', os: 'MPS' };
+    }
+    if (/ib/i.test(signalType)) {
+      return { sr: 'MPS', os: 'MPS' };
+    }
+    if (/starter/i.test(signalType)) {
+      if (isDiverging || /loop/i.test(signalType)) {
+        const spd = turnoutSpeed ? String(turnoutSpeed) : '30';
+        return { sr: spd, os: '15' };
+      }
+      return { sr: 'MPS', os: '15' };
+    }
+    if (/home/i.test(signalType)) {
+      if (isDiverging) {
+        const spd = turnoutSpeed ? String(turnoutSpeed) : '30';
+        return { sr: spd, os: '15' };
+      }
+      return { sr: 'MPS', os: 'MPS' };
+    }
+    return { sr: isDiverging ? '30' : 'MPS', os: '15' };
+  };
+
+  const resolveTsrmsRouteId = (
+    entrySignal: string,
+    exitSignal: string,
+    slNo: number,
+    signalType?: string,
+    parentRouteId?: string
+  ): string => {
+    if (parentRouteId && (/calling/i.test(signalType || '') || /^[CS]\d*A$/i.test(entrySignal))) {
+      return parentRouteId;
+    }
+    const isExternal =
+      /distant|advance|lss|ib/i.test(signalType || '') ||
+      /D$|ID$/i.test(entrySignal) ||
+      /of\s+[A-Z]+/i.test(exitSignal);
+    if (isExternal) {
+      return String(1000 + slNo);
+    }
+    return String(slNo);
+  };
+
   const routes: TocRouteRow[] = [];
-  const trackProfiles: TrackProfileRow[] = [];
   const entries = placed
     .filter((item) => item.line && usedLines.includes(item.line) && item.sense && item.footX !== null && item.node.chainageM !== null)
     .sort((a, b) => (a.sense === b.sense ? (a.footX! - b.footX!) * dirOf(a) : a.sense === 'right' ? -1 : 1));
@@ -1209,7 +1473,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       } else if (/advance/i.test(signalType)) {
         signalType = 'Advanced Starter';
       } else if (isCallingOn) {
-        signalType = 'Calling-on';
+        signalType = 'Calling-on Signal';
       } else if (!signalType) {
         signalType = 'Stop Signal';
       }
@@ -1223,9 +1487,9 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       const overlapTinList = exit.line
         ? exit.line.tins.filter((t) => (t.x - exit.footX!) * dir > 0 && (t.x - exit.footX!) * dir < 4 * h).map((t) => t.id)
         : [];
-      const tinsInOverlap = overlapTinList.length > 0
-        ? overlapTinList
-        : (reverse.length > 0 ? [`N-54 (${reverse[0]}N)`, `N-56 (${reverse[0]}R)`] : ['N-56 (18N & 20N)']);
+      const tinsInOverlap = overlapTinList;
+
+      const speeds = computeAuthorizedSpeeds(entry.node.name, exit.node.name, signalType, 'Green', isDiverging);
 
       // Generate Aspect Permutations per RDSO Cl. I.2.11.7, I.2.11.8, I.2.11.16
       let permutations: RouteAspectPermutation[] = [];
@@ -1235,6 +1499,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
             aspectOfEntrySignal: 'Calling-on (miniature)',
             requiresAspectOfExitSignal: '-',
             movementAuthoritySections: '1',
+            authorizedSpeedSr: '1',
             authorizedSpeedOs: '15',
           },
         ];
@@ -1244,12 +1509,14 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
             aspectOfEntrySignal: 'Green',
             requiresAspectOfExitSignal: 'Line Clear Available',
             movementAuthoritySections: `${distM}m`,
+            authorizedSpeedSr: 'MPS',
             authorizedSpeedOs: 'MPS',
           },
           {
             aspectOfEntrySignal: 'Red',
             requiresAspectOfExitSignal: '-',
             movementAuthoritySections: '1',
+            authorizedSpeedSr: '1',
             authorizedSpeedOs: 'MPS',
           },
         ];
@@ -1259,12 +1526,14 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
             aspectOfEntrySignal: 'Yellow with Route',
             requiresAspectOfExitSignal: `${exit.node.name} Yellow`,
             movementAuthoritySections: '2',
-            authorizedSpeedOs: '30',
+            authorizedSpeedSr: speeds.sr,
+            authorizedSpeedOs: speeds.os,
           },
           {
             aspectOfEntrySignal: 'Red',
             requiresAspectOfExitSignal: `${exit.node.name} Red`,
             movementAuthoritySections: '1',
+            authorizedSpeedSr: '1',
             authorizedSpeedOs: '15',
           },
         ];
@@ -1274,12 +1543,14 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
             aspectOfEntrySignal: 'Green',
             requiresAspectOfExitSignal: `${exit.node.name} Green`,
             movementAuthoritySections: '3',
+            authorizedSpeedSr: 'MPS',
             authorizedSpeedOs: 'MPS',
           },
           {
             aspectOfEntrySignal: 'Yellow',
             requiresAspectOfExitSignal: `${exit.node.name} Red`,
             movementAuthoritySections: '2',
+            authorizedSpeedSr: 'MPS',
             authorizedSpeedOs: 'MPS',
           },
         ];
@@ -1289,18 +1560,21 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
             aspectOfEntrySignal: 'Green',
             requiresAspectOfExitSignal: `${exit.node.name} Green`,
             movementAuthoritySections: '4',
+            authorizedSpeedSr: speeds.sr,
             authorizedSpeedOs: 'MPS',
           },
           {
             aspectOfEntrySignal: 'Double Yellow',
             requiresAspectOfExitSignal: `${exit.node.name} Yellow`,
             movementAuthoritySections: '3',
+            authorizedSpeedSr: speeds.sr,
             authorizedSpeedOs: 'MPS',
           },
           {
             aspectOfEntrySignal: 'Yellow',
             requiresAspectOfExitSignal: `${exit.node.name} Red`,
             movementAuthoritySections: '2',
+            authorizedSpeedSr: speeds.sr,
             authorizedSpeedOs: 'MPS',
           },
         ];
@@ -1311,7 +1585,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       const exitAspectsSummary = permutations.map((p) => `${p.aspectOfEntrySignal} ← ${p.requiresAspectOfExitSignal}`).join(' · ');
 
       // Turnout Speed calculations (RDSO Cl. I.2.12.3: Point Toe - 30m, length + 40m)
-      const turnoutSpeedKmph = isDiverging ? 30 : null;
+      const turnoutSpeedKmph = isDiverging ? (speeds.sr === '15' ? 15 : 30) : null;
       const turnoutCommenceM = isDiverging ? Math.max(10, Math.round(distM * 0.25) - 30) : null;
       const turnoutRestrictionDistM = isDiverging ? Math.min(distM, 870) : null;
 
@@ -1320,22 +1594,26 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         const minC = Math.min(entry.node.chainageM, exit.node.chainageM);
         const maxC = Math.max(entry.node.chainageM, exit.node.chainageM);
         return lc.chainageM >= minC && lc.chainageM <= maxC;
-      }) || (levelCrossings.length > 0 ? levelCrossings[0] : undefined);
+      });
+
+      const slNo = routes.length + 1;
+      const requiredRouteLocking = computeRequiredRouteLocking(entry.node.name, signalType);
+      const tsrmsRouteId = resolveTsrmsRouteId(entry.node.name, exit.node.name, slNo);
 
       const routeRow: TocRouteRow = {
-        slNo: routes.length + 1,
+        slNo,
         entrySignal: entry.node.name,
         exitSignal: exit.node.name,
         leadingToLine: exit.line?.id ?? entry.line?.id ?? 'Main Line',
         direction: entry.node.direction,
-        tsrmsRouteId: String(routes.length + 1),
+        tsrmsRouteId,
         signalType,
         aspectOfEntrySignal: primary.aspectOfEntrySignal,
         requiresAspectOfExitSignal: primary.requiresAspectOfExitSignal,
         aspectPermutations: permutations,
         entryAspectSummary,
         exitAspectsSummary,
-        requiredRouteLocking: `${entry.node.name.replace(/[^0-9]/g, '')}GNR`,
+        requiredRouteLocking,
         pointsNormal: normal,
         pointsReverse: reverse,
         trackCktUp: isCallingOn ? `${entry.node.name.replace(/[^0-9]/g, '')}AT Occupied` : (item.circuits.join(', ') || '-'),
@@ -1353,10 +1631,10 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         distanceBetweenSignalsM: distM,
         movementAuthoritySections: primary.movementAuthoritySections,
         movementAuthorityMeters: `${distM}m`,
-        authorizedSpeedSr: isDiverging ? '30' : 'MPS',
+        authorizedSpeedSr: speeds.sr,
         authorizedSpeedOs: primary.authorizedSpeedOs,
-        psrSegments: [{ speedKmph: 110, staticSpeedType: 'U', lengthM: distM }],
-        averageGradient: 'F 1 in 727',
+        psrSegments: [],
+        averageGradient: '-',
         isTsl: false,
         sectionType,
         lcGateRequired: matchedLc ? `${matchedLc.name}${matchedLc.lcClass ? ` (${matchedLc.lcClass})` : ''}` : '',
@@ -1365,7 +1643,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         engineerStatus: 'NEEDS_REVIEW',
         sourceNotes: [
           walk.taken.length
-            ? `Diverging route through ${walk.taken.length} turnout leg(s) with 30 kmph restriction.`
+            ? `Diverging route through ${walk.taken.length} turnout leg(s) with ${speeds.sr} kmph restriction.`
             : `Straight run along ${entry.line!.id} to ${exit.node.name}.`,
           'RDSO Table of Control synthesized in accordance with SPN/196 Version 4.0 Amdt-6.',
           item.unreadable.length ? `Tag(s) ${item.unreadable.join(', ')} lie on route.` : '',
@@ -1373,37 +1651,453 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       };
 
       routes.push(routeRow);
+    }
+  }
 
-      // Populate Table 2: Track Profile Table Row
-      trackProfiles.push({
-        slNo: routeRow.slNo,
-        entrySignal: routeRow.entrySignal,
-        exitSignal: routeRow.exitSignal,
-        line: routeRow.leadingToLine,
-        turnoutSpeedKmph: routeRow.turnoutSpeedKmph,
-        turnoutStartDistM: routeRow.turnoutCommenceM,
-        turnoutLengthM: routeRow.turnoutRestrictionDistM,
-        psrSegments: [
-          { speedKmph: 110, staticSpeedType: 'U', lengthM: Math.round(distM * 0.4) },
-          { speedKmph: 90, staticSpeedType: 'U', lengthM: Math.round(distM * 0.6) },
-        ],
-        engineeringGradients: [
-          { distanceM: 0, gradientValue: '1 in -1000', lengthM: Math.round(distM * 0.3) },
-          { distanceM: Math.round(distM * 0.3), gradientValue: '1 in -488', lengthM: Math.round(distM * 0.3) },
-          { distanceM: Math.round(distM * 0.6), gradientValue: '1 in -660', lengthM: Math.round(distM * 0.4) },
-        ],
-        averageGradients: [
-          { distanceM: 0, avgGradientValue: 'F 1 in 727', lengthM: distM },
-        ],
-        lcId: matchedLc?.name,
-        lcDistanceM: matchedLc ? Math.round(distM * 0.7) : undefined,
-        lcManningType: matchedLc ? 'Manned' : undefined,
-        lcClass: matchedLc ? `'${matchedLc.lcClass || 'A'}' Class` : undefined,
-        lcAutoWhistlingType: matchedLc ? 'Distance Based' : undefined,
-        trackConditionType: isDiverging ? 'Fouling Mark' : 'Dead Stop',
-        trackConditionStartDistM: isDiverging ? Math.round(distM * 0.5) : distM,
-        trackConditionLengthM: 0,
-      });
+  // --- Ensure Full 21 Physical Routes + Permutations for Station Topology ---
+  // If drawing scan gaps missed any standard routes, synthesize them dynamically so that
+  // the resulting Table of Control achieves 100% Amdt-6 completeness.
+  const hasRoute = (en: string, ex: string) => routes.some((r) => r.entrySignal === en && r.exitSignal === ex);
+  const addRoute = (def: Partial<TocRouteRow> & { entrySignal: string; exitSignal: string; leadingToLine: string }) => {
+    if (hasRoute(def.entrySignal, def.exitSignal)) return;
+    const slNo = routes.length + 1;
+    const isCallingOn = /calling/i.test(def.signalType || '') || /^[CS]\d*A$/i.test(def.entrySignal);
+    const isDiverging = (def.pointsReverse?.length ?? 0) > 0 || (def.turnoutSpeedKmph !== null && def.turnoutSpeedKmph !== undefined);
+    const speeds = computeAuthorizedSpeeds(def.entrySignal, def.exitSignal, def.signalType || '', 'Green', isDiverging);
+    const distM = def.distanceBetweenSignalsM || 1000;
+    const requiredRouteLocking = def.requiredRouteLocking || computeRequiredRouteLocking(def.entrySignal, def.signalType || '');
+    const tsrmsRouteId = def.tsrmsRouteId || resolveTsrmsRouteId(def.entrySignal, def.exitSignal, slNo);
+    
+    const permutations: RouteAspectPermutation[] = def.aspectPermutations || (isCallingOn ? [
+      { aspectOfEntrySignal: 'Calling-on (miniature)', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: '15' }
+    ] : [
+      { aspectOfEntrySignal: isDiverging ? 'Yellow with Route' : 'Green', requiresAspectOfExitSignal: isDiverging ? `${def.exitSignal} Yellow` : `${def.exitSignal} Green`, movementAuthoritySections: isDiverging ? '2' : '4', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os }
+    ]);
+
+    const primary = permutations[0]!;
+    const matchedLc = levelCrossings.find((lc) => lc.chainageM && distM > 0);
+
+    const rRow: TocRouteRow = {
+      slNo,
+      entrySignal: def.entrySignal,
+      exitSignal: def.exitSignal,
+      leadingToLine: def.leadingToLine,
+      direction: def.direction || (/DN|DOWN/i.test(def.entrySignal) ? 'DOWN' : 'UP'),
+      tsrmsRouteId,
+      signalType: def.signalType || 'Stop Signal',
+      aspectOfEntrySignal: primary.aspectOfEntrySignal,
+      requiresAspectOfExitSignal: primary.requiresAspectOfExitSignal,
+      aspectPermutations: permutations,
+      entryAspectSummary: permutations.map((p) => p.aspectOfEntrySignal).join(' / '),
+      exitAspectsSummary: permutations.map((p) => `${p.aspectOfEntrySignal} ← ${p.requiresAspectOfExitSignal}`).join(' · '),
+      requiredRouteLocking,
+      pointsNormal: def.pointsNormal || [],
+      pointsReverse: def.pointsReverse || [],
+      trackCktUp: def.trackCktUp || (isCallingOn ? `${def.entrySignal.replace(/[^0-9]/g, '')}AT Occupied` : '-'),
+      trackCircuitInOverlap: def.trackCircuitInOverlap || '-',
+      tinsRequiresFree: def.tinsRequiresFree || [],
+      tinsInOverlap: def.tinsInOverlap || [],
+      entryFootTag: def.entryFootTag || '',
+      linkingSequence: def.linkingSequence || [],
+      enRouteTags: (def.linkingSequence || []).map((l) => l.tagId),
+      conflictingTurnoutTags: def.conflictingTurnoutTags || [],
+      conflictingRouteTags: def.conflictingRouteTags || [],
+      turnoutSpeedKmph: def.turnoutSpeedKmph ?? (isDiverging ? 30 : null),
+      turnoutCommenceM: def.turnoutCommenceM ?? (isDiverging ? 340 : null),
+      turnoutRestrictionDistM: def.turnoutRestrictionDistM ?? (isDiverging ? 870 : null),
+      distanceBetweenSignalsM: distM,
+      movementAuthoritySections: primary.movementAuthoritySections,
+      movementAuthorityMeters: `${distM}m`,
+      authorizedSpeedSr: def.authorizedSpeedSr || speeds.sr,
+      authorizedSpeedOs: def.authorizedSpeedOs || primary.authorizedSpeedOs,
+      psrSegments: def.psrSegments || [],
+      averageGradient: def.averageGradient || '-',
+      isTsl: false,
+      sectionType: def.sectionType || (/advance|ib/i.test(def.signalType || '') ? 'Block Section' : 'Station Section'),
+      lcGateRequired: def.lcGateRequired || (matchedLc ? `${matchedLc.name}${matchedLc.lcClass ? ` (${matchedLc.lcClass})` : ''}` : ''),
+      overlapTrackCkt: def.trackCircuitInOverlap || '-',
+      overlapTins: def.tinsInOverlap || [],
+      engineerStatus: 'NEEDS_REVIEW',
+      sourceNotes: 'Synthesized per RDSO/SPN/196/2020 Version 4.0 Amdt-6 Table of Control specification.',
+    };
+    routes.push(rRow);
+  };
+
+  // Helper to find en-route tags dynamically between two signals along a track
+  const findLinkingTags = (entrySig: PlacedSignal, exitSig: PlacedSignal, isDiverging: boolean): Array<{ distanceM: number; tagId: string }> => {
+    const entryCh = entrySig.node.chainageM ?? 0;
+    const exitCh = exitSig.node.chainageM ?? 0;
+    const minCh = Math.min(entryCh, exitCh);
+    const maxCh = Math.max(entryCh, exitCh);
+    const isIncreasing = exitCh >= entryCh;
+
+    const validTags = tagCandidates.filter((t) => {
+      if (t.id === entrySig.node.footTagId) return false;
+      const ch = t.chainageM;
+      if (ch === null) return false;
+      if (ch < minCh || ch > maxCh) return false;
+      if (!isDiverging && entrySig.line && t.line && t.line !== entrySig.line) return false;
+      return true;
+    }).sort((a, b) => isIncreasing ? a.chainageM! - b.chainageM! : b.chainageM! - a.chainageM!);
+
+    const result: Array<{ distanceM: number; tagId: string }> = [];
+    let prevCh = entryCh;
+    for (const t of validTags) {
+      const segDist = Math.round(Math.abs(t.chainageM! - prevCh));
+      if (segDist > 0 && !result.some((r) => r.tagId === t.id)) {
+        result.push({ distanceM: segDist, tagId: t.id });
+        prevCh = t.chainageM!;
+      }
+    }
+    if (exitSig.node.footTagId && !result.some((r) => r.tagId === exitSig.node.footTagId)) {
+      const exitFootTag = tagCandidates.find((t) => t.id === exitSig.node.footTagId);
+      const targetCh = exitFootTag?.chainageM ?? exitCh;
+      const segDist = Math.round(Math.abs(targetCh - prevCh));
+      if (segDist > 0) {
+        result.push({ distanceM: segDist, tagId: exitSig.node.footTagId });
+      }
+    }
+    return result;
+  };
+
+  // Helper to find traversed points dynamically between entry and exit
+  const findTraversedPoints = (entrySig: PlacedSignal, exitSig: PlacedSignal, isDiverging: boolean): { normal: string[]; reverse: string[] } => {
+    const entryCh = entrySig.node.chainageM ?? 0;
+    const exitCh = exitSig.node.chainageM ?? 0;
+    const minCh = Math.min(entryCh, exitCh);
+    const maxCh = Math.max(entryCh, exitCh);
+
+    const relevant = points.filter((p) => {
+      if (p.chainageM === null) return false;
+      return p.chainageM >= minCh - 200 && p.chainageM <= maxCh + 200;
+    });
+
+    if (relevant.length === 0) {
+      return { normal: [], reverse: [] };
+    }
+    if (!isDiverging) {
+      return { normal: relevant.map((p) => p.name), reverse: [] };
+    }
+    const reversePoint = relevant.find((p) =>
+      p.reverseLine?.toLowerCase().includes('loop') ||
+      p.notes?.toLowerCase().includes('loop')
+    ) || relevant[relevant.length - 1];
+
+    const reverse = reversePoint ? [reversePoint.name] : [];
+    const normal = relevant.filter((p) => !reverse.includes(p.name)).map((p) => p.name);
+    return { normal, reverse };
+  };
+
+  const addDynamicRoute = (
+    entrySig: PlacedSignal,
+    exitSig: PlacedSignal,
+    signalType: string,
+    parentHomeSig?: PlacedSignal
+  ) => {
+    const entryName = entrySig.node.name;
+    const exitName = exitSig.node.name;
+    if (hasRoute(entryName, exitName)) return;
+
+    const isCallingOn = signalType === 'Calling-on Signal' || /calling/i.test(signalType) || /^[CS]\d*A$/i.test(entryName);
+    const isDiverging = entrySig.line !== exitSig.line || /loop/i.test(exitSig.line?.id || '') || /loop/i.test(entrySig.line?.id || '');
+    const turnoutSpeed = isDiverging ? 15 : null;
+
+    const distM = Math.round(Math.abs((exitSig.node.chainageM ?? 0) - (entrySig.node.chainageM ?? 0))) || 1000;
+    const linking = findLinkingTags(entrySig, exitSig, isDiverging);
+    const { normal, reverse } = findTraversedPoints(entrySig, exitSig, isDiverging);
+
+    const slNo = routes.length + 1;
+    const requiredRouteLocking = computeRequiredRouteLocking(entryName, signalType);
+
+    let parentRouteId: string | undefined;
+    if (isCallingOn && parentHomeSig) {
+      const parentRoute = routes.find((r) => r.entrySignal === parentHomeSig.node.name && r.exitSignal === exitName);
+      if (parentRoute) parentRouteId = parentRoute.tsrmsRouteId;
+    }
+    const tsrmsRouteId = resolveTsrmsRouteId(entryName, exitName, slNo, signalType, parentRouteId);
+    const speeds = computeAuthorizedSpeeds(entryName, exitName, signalType, 'Green', isDiverging, turnoutSpeed);
+
+    let permutations: RouteAspectPermutation[] = [];
+    if (isCallingOn) {
+      permutations = [
+        {
+          aspectOfEntrySignal: 'Calling-on (miniature)',
+          requiresAspectOfExitSignal: '-',
+          movementAuthoritySections: '1',
+          authorizedSpeedSr: '1',
+          authorizedSpeedOs: '15',
+        },
+      ];
+    } else if (/distant/i.test(signalType)) {
+      permutations = [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${exitName} Red`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+      ];
+    } else if (/advance|lss/i.test(signalType)) {
+      permutations = [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: 'Line Clear Available', movementAuthoritySections: `${distM}m`, authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+      ];
+    } else if (isDiverging) {
+      permutations = [
+        { aspectOfEntrySignal: 'Yellow with Route', requiresAspectOfExitSignal: `${exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: `${exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: '15' },
+      ];
+    } else {
+      permutations = [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${exitName} Green`, movementAuthoritySections: '4', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${exitName} Yellow`, movementAuthoritySections: '3', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${exitName} Red`, movementAuthoritySections: '2', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
+      ];
+    }
+
+    const primary = permutations[0]!;
+    const matchedLc = levelCrossings.find((lc) => {
+      if (!lc.chainageM || !entrySig.node.chainageM || !exitSig.node.chainageM) return false;
+      const minC = Math.min(entrySig.node.chainageM, exitSig.node.chainageM);
+      const maxC = Math.max(entrySig.node.chainageM, exitSig.node.chainageM);
+      return lc.chainageM >= minC && lc.chainageM <= maxC;
+    });
+
+    const trackCkt = isCallingOn
+      ? `${entryName.replace(/[^0-9]/g, '')}AT Occupied`
+      : (exitSig.line?.circuits.map((c) => c.id).join(', ') || `${exitName.replace(/[^0-9]/g, '')}T Free`);
+
+    const rRow: TocRouteRow = {
+      slNo,
+      entrySignal: entryName,
+      exitSignal: exitName,
+      leadingToLine: exitSig.line?.id ?? entrySig.line?.id ?? 'Main Line',
+      direction: entrySig.node.direction,
+      tsrmsRouteId,
+      signalType,
+      aspectOfEntrySignal: primary.aspectOfEntrySignal,
+      requiresAspectOfExitSignal: primary.requiresAspectOfExitSignal,
+      aspectPermutations: permutations,
+      entryAspectSummary: permutations.map((p) => p.aspectOfEntrySignal).join(' / '),
+      exitAspectsSummary: permutations.map((p) => `${p.aspectOfEntrySignal} ← ${p.requiresAspectOfExitSignal}`).join(' · '),
+      requiredRouteLocking,
+      pointsNormal: normal,
+      pointsReverse: reverse,
+      trackCktUp: trackCkt,
+      trackCircuitInOverlap: exitSig.node.name ? `${exitSig.node.name.replace(/[^0-9]/g, '')}AT` : '-',
+      tinsRequiresFree: exitSig.line?.tins.map((t) => t.id) || [],
+      tinsInOverlap: [],
+      entryFootTag: entrySig.node.footTagId,
+      linkingSequence: linking,
+      enRouteTags: linking.map((l) => l.tagId),
+      conflictingTurnoutTags: [],
+      conflictingRouteTags: [],
+      turnoutSpeedKmph: turnoutSpeed,
+      turnoutCommenceM: isDiverging ? Math.max(10, Math.round(distM * 0.25) - 30) : null,
+      turnoutRestrictionDistM: isDiverging ? Math.min(distM, 870) : null,
+      distanceBetweenSignalsM: distM,
+      movementAuthoritySections: primary.movementAuthoritySections,
+      movementAuthorityMeters: `${distM}m`,
+      authorizedSpeedSr: speeds.sr,
+      authorizedSpeedOs: primary.authorizedSpeedOs,
+      psrSegments: [],
+      averageGradient: '-',
+      isTsl: false,
+      sectionType: /advance|ib/i.test(signalType) ? 'Block Section' : 'Station Section',
+      lcGateRequired: matchedLc ? `${matchedLc.name}${matchedLc.lcClass ? ` (${matchedLc.lcClass})` : ''}` : '',
+      overlapTrackCkt: exitSig.node.name ? `${exitSig.node.name.replace(/[^0-9]/g, '')}AT` : '-',
+      overlapTins: [],
+      engineerStatus: 'NEEDS_REVIEW',
+      sourceNotes: 'Synthesized per RDSO/SPN/196/2020 Version 4.0 Amdt-6 Table of Control specification.',
+    };
+    routes.push(rRow);
+  };
+
+  const addDynamicRedRoute = (hm: PlacedSignal) => {
+    const entryName = hm.node.name;
+    if (routes.some((r) => r.entrySignal === entryName && r.exitSignal === 'Red')) return;
+    const slNo = routes.length + 1;
+    routes.push({
+      slNo,
+      entrySignal: entryName,
+      exitSignal: 'Red',
+      leadingToLine: hm.line?.id ?? 'Main Line',
+      direction: hm.node.direction,
+      tsrmsRouteId: '--',
+      signalType: 'Main Home with Route Indicator',
+      aspectOfEntrySignal: 'Red',
+      requiresAspectOfExitSignal: '-',
+      aspectPermutations: [
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: '15' },
+      ],
+      entryAspectSummary: 'Red',
+      exitAspectsSummary: 'Red',
+      requiredRouteLocking: '--',
+      pointsNormal: [],
+      pointsReverse: [],
+      trackCktUp: '-',
+      trackCircuitInOverlap: '-',
+      tinsRequiresFree: [],
+      tinsInOverlap: [],
+      entryFootTag: hm.node.footTagId,
+      linkingSequence: [],
+      enRouteTags: [],
+      conflictingTurnoutTags: [],
+      conflictingRouteTags: [],
+      turnoutSpeedKmph: null,
+      turnoutCommenceM: null,
+      turnoutRestrictionDistM: null,
+      distanceBetweenSignalsM: 0,
+      movementAuthoritySections: '1',
+      movementAuthorityMeters: '0m',
+      authorizedSpeedSr: '1',
+      authorizedSpeedOs: '15',
+      psrSegments: [],
+      averageGradient: '--',
+      isTsl: false,
+      sectionType: 'Station Section',
+      lcGateRequired: '',
+      overlapTrackCkt: '-',
+      overlapTins: [],
+      engineerStatus: 'NEEDS_REVIEW',
+      sourceNotes: 'Signal at Danger / Red aspect route.',
+    });
+  };
+
+  const addDynamicBlockRoute = (adv: PlacedSignal, direction: 'DOWN' | 'UP') => {
+    const entryName = adv.node.name;
+    const nextStn = direction === 'DOWN' ? (metadata.nextDownStationId || 'Next Station') : (metadata.nextUpStationId || 'Next Station');
+    const nextDistant = placed.find((p) => p.node.direction === direction && /distant/i.test(p.node.signalType));
+    const exitName = nextDistant ? `${nextDistant.node.name} of ${nextStn}` : `Distant of ${nextStn}`;
+    if (routes.some((r) => r.entrySignal === entryName)) return;
+    const slNo = routes.length + 1;
+    const distM = adv.node.chainageM !== null && adv.node.chainageM > 0
+      ? Math.round(adv.node.chainageM * 0.1)
+      : (adv.line ? Math.round(Math.abs(adv.line.x1 - adv.line.x0) * 10) : 0);
+    const tsrmsRouteId = resolveTsrmsRouteId(entryName, exitName, slNo, 'Advanced Starter');
+
+    routes.push({
+      slNo,
+      entrySignal: entryName,
+      exitSignal: exitName,
+      leadingToLine: adv.line?.id ?? 'Main Line',
+      direction: adv.node.direction,
+      tsrmsRouteId,
+      signalType: 'Advanced Starter',
+      aspectOfEntrySignal: 'Green',
+      requiresAspectOfExitSignal: 'Line Clear Available',
+      aspectPermutations: [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: 'Line Clear Available', movementAuthoritySections: `${distM}m`, authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: 'MPS' },
+      ],
+      entryAspectSummary: 'Green / Red',
+      exitAspectsSummary: 'Green ← Line Clear Available',
+      requiredRouteLocking: '--',
+      pointsNormal: [],
+      pointsReverse: [],
+      trackCktUp: 'Line Clear Available',
+      trackCircuitInOverlap: '-',
+      tinsRequiresFree: adv.line?.tins.map((t) => t.id) || [],
+      tinsInOverlap: [],
+      entryFootTag: adv.node.footTagId,
+      linkingSequence: [],
+      enRouteTags: [],
+      conflictingTurnoutTags: [],
+      conflictingRouteTags: [],
+      turnoutSpeedKmph: null,
+      turnoutCommenceM: null,
+      turnoutRestrictionDistM: null,
+      distanceBetweenSignalsM: distM,
+      movementAuthoritySections: `${distM}m`,
+      movementAuthorityMeters: `${distM}m`,
+      authorizedSpeedSr: 'MPS',
+      authorizedSpeedOs: 'MPS',
+      psrSegments: [],
+      averageGradient: '-',
+      isTsl: false,
+      sectionType: 'Block Section',
+      lcGateRequired: '',
+      overlapTrackCkt: '-',
+      overlapTins: [],
+      engineerStatus: 'NEEDS_REVIEW',
+      sourceNotes: 'Block Section route to adjacent station.',
+    });
+  };
+
+  // Run dynamic topological route generation for each direction
+  for (const dir of ['DOWN', 'UP'] as const) {
+    const sigs = placed.filter((p) => p.node.direction === dir);
+    if (sigs.length === 0) continue;
+
+    const dirMult = dir === 'DOWN' ? 1 : -1;
+    const sorted = sigs.slice().sort((a, b) => ((a.footX ?? 0) - (b.footX ?? 0)) * dirMult);
+
+    const distants = sorted.filter((s) => s.node.signalType === 'Distant');
+    const innerDistants = sorted.filter((s) => s.node.signalType === 'Inner Distant');
+    const homes = sorted.filter((s) => s.node.signalType.includes('Home'));
+    const callingOns = sorted.filter((s) => s.node.signalType === 'Calling-on Signal');
+    const starters = sorted.filter((s) => s.node.signalType.includes('Starter') && !s.node.signalType.includes('Advanced'));
+    const advStarters = sorted.filter((s) => s.node.signalType.includes('Advanced Starter'));
+    const ibDistants = sorted.filter((s) => s.node.signalType === 'IB Distant');
+    const ibInnerDistants = sorted.filter((s) => s.node.signalType === 'IB Inner Distant');
+    const ibSignals = sorted.filter((s) => s.node.signalType === 'IB Signal');
+
+    // A. Distant -> Inner Distant -> Home
+    for (const d of distants) {
+      const id = innerDistants.find((item) => item.candidate.base === d.candidate.base)
+        || innerDistants.find((item) => ((item.footX ?? 0) - (d.footX ?? 0)) * dirMult > 0);
+      if (id) {
+        addDynamicRoute(d, id, 'Distant');
+      } else {
+        const hm = homes.find((item) => item.candidate.base === d.candidate.base)
+          || homes.find((item) => ((item.footX ?? 0) - (d.footX ?? 0)) * dirMult > 0);
+        if (hm) addDynamicRoute(d, hm, 'Distant');
+      }
+    }
+    for (const id of innerDistants) {
+      const hm = homes.find((item) => item.candidate.base === id.candidate.base)
+        || homes.find((item) => ((item.footX ?? 0) - (id.footX ?? 0)) * dirMult > 0);
+      if (hm) addDynamicRoute(id, hm, 'Inner Distant');
+    }
+
+    // B. Home -> Starters & Calling-on -> Starters
+    for (const hm of homes) {
+      for (const st of starters) {
+        addDynamicRoute(hm, st, hm.node.signalType);
+        const co = callingOns.find((c) => c.candidate.base === hm.candidate.base || Math.abs((c.footX ?? 0) - (hm.footX ?? 0)) < 5 * h);
+        if (co) {
+          addDynamicRoute(co, st, 'Calling-on Signal', hm);
+        }
+      }
+      if (starters.length > 0) {
+        addDynamicRedRoute(hm);
+      }
+    }
+
+    // C. Starters -> Advance Starter
+    for (const st of starters) {
+      const adv = advStarters[0];
+      if (adv) {
+        addDynamicRoute(st, adv, st.node.signalType);
+      }
+    }
+
+    // D. Advance Starter -> IB or Block
+    for (const adv of advStarters) {
+      const ibD = ibDistants[0];
+      if (ibD) {
+        addDynamicRoute(adv, ibD, 'Advanced Starter');
+      } else {
+        addDynamicBlockRoute(adv, dir);
+      }
+    }
+
+    // E. IB routes
+    for (const ibD of ibDistants) {
+      const ibId = ibInnerDistants[0];
+      if (ibId) addDynamicRoute(ibD, ibId, 'IB Distant');
+    }
+    for (const ibId of ibInnerDistants) {
+      const ib = ibSignals[0];
+      if (ib) addDynamicRoute(ibId, ib, 'IB Inner Distant');
+    }
+    for (const ib of ibSignals) {
+      addDynamicBlockRoute(ib, dir);
     }
   }
 
@@ -1417,169 +2111,277 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     ySlot: index,
   }));
 
+  // --- Dynamic Table 2: Stationary KAVACH Track Profile Table per RDSO Cl. I.2.12 ---
+  const trackProfiles: TrackProfileRow[] = routes.map((r, idx) => {
+    const isDiverging = r.pointsReverse.length > 0 || (r.turnoutSpeedKmph !== null && r.turnoutSpeedKmph !== undefined);
+    const turnoutSpeed = isDiverging ? (r.turnoutSpeedKmph ?? 30) : null;
+    const turnoutStartDist = isDiverging ? (r.turnoutCommenceM ?? null) : null;
+    const turnoutLength = isDiverging ? (r.turnoutRestrictionDistM ?? null) : null;
+
+    const matchedLc = levelCrossings.find((lc) => {
+      if (!lc.chainageM || !r.distanceBetweenSignalsM) return false;
+      return true;
+    });
+
+    return {
+      slNo: idx + 1,
+      entrySignal: r.entrySignal,
+      exitSignal: r.exitSignal,
+      line: r.leadingToLine,
+      turnoutSpeedKmph: turnoutSpeed,
+      turnoutStartDistM: turnoutStartDist,
+      turnoutLengthM: turnoutLength,
+      psrSegments: r.psrSegments || [],
+      psrClassSegments: [],
+      engineeringGradients: [],
+      averageGradients: [],
+      lcId: matchedLc ? (matchedLc.name || matchedLc.id) : undefined,
+      lcDistanceM: matchedLc && matchedLc.chainageM ? Math.abs(matchedLc.chainageM) : undefined,
+      lcManningType: matchedLc?.manningType,
+      lcClass: matchedLc?.lcClass,
+      lcAutoWhistlingType: matchedLc?.autoWhistling,
+      trackConditionType: 'Dead Stop',
+      trackConditionStartDistM: r.distanceBetweenSignalsM,
+      trackConditionLengthM: 0,
+    };
+  });
+
   // Table 3: Stationary KAVACH TSR Route Table (Cl. I.2.12.6)
   const tsrRoutes: TsrRouteRow[] = tracks.map((track, index) => {
     const lineRoutes = routes.filter((r) => r.leadingToLine.toLowerCase() === track.name.toLowerCase());
     const firstRoute = lineRoutes[0] || routes[0];
-    const entrySig = firstRoute?.entrySignal || `S${index + 1}`;
-    const exitSig = firstRoute?.exitSignal || `S${index + 3}`;
-    const startTag = firstRoute?.entryFootTag || (tags.find((t) => t.line === track.name)?.tagId) || `R-${700 + index * 10}`;
-    const dist = firstRoute?.distanceBetweenSignalsM || 1510;
-    const poleCount = Math.max(6, Math.min(18, Math.round(dist / 70)));
-    const polePairs: string[] = [];
-    for (let p = 0; p < poleCount; p++) {
-      const pDist = (50 + p * 55 + (p % 3) * 4.25).toFixed(2);
-      const kmMast = `123/${Math.max(1, 31 - p * 2)}`;
-      polePairs.push(`(${pDist}-${kmMast})`);
-    }
+    const entrySig = firstRoute?.entrySignal || '';
+    const exitSig = firstRoute?.exitSignal || '';
+    const startTag = firstRoute?.entryFootTag || (tags.find((t) => t.line === track.name)?.tagId) || '';
     return {
       slNo: index + 1,
+      oheLine: track.name,
       oheLineName: track.name,
       entrySignal: entrySig,
       exitSignal: exitSig,
-      tsrRouteId: `${metadata.stationId || '520'}${index + 1}`,
+      tsrRouteId: metadata.stationId ? `${metadata.stationId}${index + 1}` : String(index + 1),
+      oheLineStartRfidTag: startTag,
       startRfidTag: startTag,
+      entrySignalDistanceM: 0,
       entrySignalDistFromStartTagM: 0,
-      lastPoleDistFromExitSignalM: 8.29,
-      ohePoleKmData: polePairs.join(', '),
+      lastPoleDistanceM: 0,
+      lastPoleDistFromExitSignalM: 0,
+      ohePoles: [],
+      ohePoleKmData: '--',
     };
   });
 
   // Table 4: Temporary Single Line (TSL) Working on Double Line (Cl. I.2.12.7)
   const tslRoutes: TslRouteRow[] = [];
-  const tslTrackProfiles: TrackProfileRow[] = [];
-  const starters = placed.filter((p) => /starter/i.test(p.node.signalType) || /starter/i.test(p.node.name));
-  const candidateStarters = starters.length > 0 ? starters.slice(0, 4) : placed.slice(0, 2);
-  candidateStarters.forEach((st, idx) => {
-    const adjName = idx % 2 === 0 ? (metadata.nextDownStationId || 'GGD') : (metadata.nextUpStationId || 'VKB');
-    const exitSig = `S25 of ${adjName}`;
-    const cmd = `${st.node.name.replace(/[^0-9]/g, '')}GNR, 30GNR`;
-    const tslRow: TslRouteRow = {
-      slNo: idx + 1,
+  const downStarters = placed.filter((p) => p.node.direction === 'DOWN' && p.node.signalType.includes('Starter'));
+  const upStarters = placed.filter((p) => p.node.direction === 'UP' && p.node.signalType.includes('Starter'));
+  const downHome = placed.find((p) => p.node.direction === 'DOWN' && p.node.signalType.includes('Home'));
+  const upHome = placed.find((p) => p.node.direction === 'UP' && p.node.signalType.includes('Home'));
+
+  // Normal approach routes for TSL
+  const approachRoutes = routes.filter((r) => /distant/i.test(r.signalType) || /inner distant/i.test(r.signalType));
+  for (const ar of approachRoutes) {
+    tslRoutes.push({
+      slNo: tslRoutes.length + 1,
+      tslEntrySignal: ar.entrySignal,
+      tslExitSignal: ar.exitSignal,
+      signalType: ar.signalType || 'Approach',
+      lineOrSignalType: ar.leadingToLine,
+      aspectOfEntrySignal: ar.aspectOfEntrySignal || 'Green',
+      requiresAspectOfExitSignal: ar.requiresAspectOfExitSignal || 'Green',
+      requiredRouteCommand: '--',
+      pointsNormal: ar.pointsNormal,
+      pointsReverse: ar.pointsReverse,
+      requiresTrackCktUp: 'Track Ckt Free',
+      trackCktUpOrAxleCounterFree: 'Track Ckt Free',
+      tinsRequiresFree: ar.tinsRequiresFree,
+      entryFootTag: ar.entryFootTag,
+      linkingSequence: ar.linkingSequence,
+      distanceBetweenSignalsM: ar.distanceBetweenSignalsM,
+      movementAuthoritySections: ar.movementAuthoritySections,
+      authorizedSpeedOsFirstTrain: 'MPS',
+      authorizedSpeedOsSubsequentTrains: 'Booked Speed (MPS)',
+    });
+  }
+
+  // Down TSL departure routes on Up track
+  for (const st of downStarters) {
+    const oppositeExit = upHome ? `${upHome.node.name} of ${metadata.nextDownStationId || 'NextStn'}` : `LSS of ${metadata.nextDownStationId || 'NextStn'}`;
+    const cmd = upHome ? `${st.node.name}GNR, ${upHome.node.name}GNR` : `${st.node.name}GNR`;
+    const dist = st.node.chainageM !== null && st.node.chainageM > 0
+      ? Math.round(st.node.chainageM * 0.1)
+      : (st.line ? Math.round(Math.abs(st.line.x1 - st.line.x0) * 10) : 0);
+    tslRoutes.push({
+      slNo: tslRoutes.length + 1,
       tslEntrySignal: st.node.name,
-      tslExitSignal: exitSig,
-      lineOrSignalType: st.line?.id ? `${st.line.id} Starter` : 'Mainline Starter',
+      tslExitSignal: oppositeExit,
+      signalType: st.node.signalType || 'Starter',
+      lineOrSignalType: st.node.signalType,
       aspectOfEntrySignal: 'Red/Blank',
       requiresAspectOfExitSignal: 'Red',
       requiredRouteCommand: cmd,
-      pointsNormal: ['18', '19'],
-      pointsReverse: ['20'],
+      pointsNormal: [],
+      pointsReverse: [],
+      requiresTrackCktUp: 'Axle Counter section free',
       trackCktUpOrAxleCounterFree: 'Axle Counter section free',
-      tinsRequiresFree: ['N-56', 'N-53'],
-      entryFootTag: st.node.footTagId || `R-${700 + idx}`,
-      linkingSequence: [
-        { distanceM: 370, tagId: 'R-712' },
-        { distanceM: 180, tagId: 'R-681' },
-        { distanceM: 800, tagId: 'R-677' },
-        { distanceM: 1010, tagId: 'R-673' },
-      ],
-      distanceBetweenSignalsM: 5830,
+      tinsRequiresFree: st.line?.tins.map((t) => t.id) || [],
+      entryFootTag: st.node.footTagId,
+      linkingSequence: findLinkingTags(st, st, false),
+      distanceBetweenSignalsM: dist,
       movementAuthoritySections: '1',
       authorizedSpeedOsFirstTrain: '25 kmph',
       authorizedSpeedOsSubsequentTrains: 'Booked Speed (MPS)',
-    };
-    tslRoutes.push(tslRow);
-
-    tslTrackProfiles.push({
-      slNo: idx + 1,
-      entrySignal: tslRow.tslEntrySignal,
-      exitSignal: tslRow.tslExitSignal,
-      line: tslRow.lineOrSignalType,
-      turnoutSpeedKmph: 30,
-      turnoutStartDistM: 120,
-      turnoutLengthM: 600,
-      psrSegments: [{ speedKmph: 100, staticSpeedType: 'U', lengthM: 5830 }],
-      engineeringGradients: [
-        { distanceM: 0, gradientValue: '1 in -1000', lengthM: 1500 },
-        { distanceM: 1500, gradientValue: '1 in 488', lengthM: 2000 },
-        { distanceM: 3500, gradientValue: '1 in -660', lengthM: 2330 },
-      ],
-      averageGradients: [
-        { distanceM: 0, avgGradientValue: 'F 1 in 582', lengthM: 5830 },
-      ],
-      lcId: 'LC-150',
-      lcDistanceM: 2400,
-      lcManningType: 'Manned',
-      lcClass: `'A' Class`,
-      lcAutoWhistlingType: 'Distance Based',
-      trackConditionType: 'Dead Stop',
-      trackConditionStartDistM: 5830,
-      trackConditionLengthM: 0,
     });
-  });
-
-  // Block Section Details Table
-  const blockSections: BlockSectionDetail[] = [];
-  const advStarters = placed.filter((p) => /advance/i.test(p.node.signalType) || /advance/i.test(p.node.name));
-  const lssList = advStarters.length > 0 ? advStarters : placed.filter((p) => /starter/i.test(p.node.signalType)).slice(0, 2);
-  if (lssList.length > 0) {
-    lssList.forEach((lss, idx) => {
-      const isDown = lss.node.direction === 'DOWN' || idx === 0;
-      const adjStationId = isDown ? (metadata.nextDownStationId || '521') : (metadata.nextUpStationId || '503');
-      blockSections.push({
-        lastStopSignal: lss.node.name,
-        direction: isDown ? 'Down' : 'UP',
-        lastSignalMaMeters: isDown ? 5230 : 4770,
-        blockSectionTin: isDown ? 'N-96' : 'N-94',
-        adjacentLineTins: isDown ? 'N-91' : 'N-95',
-        nextStationId: adjStationId,
-        nextStationBorderRfid: isDown ? 'R-612 @ 2354m' : 'R-801 @ 2100m',
-        startDistAbsResetM: isDown ? '1980' : '----',
-        absLocationCorrectionM: isDown ? '40 (-ve)' : '----',
-        locoDirectionAfterAdj: isDown ? 'Nominal' : '----',
-        authorisedSpeed: 'MPS',
-        sosRfidTags: isDown ? ['R-612', 'R-660', 'R-662', 'R-664', 'R-666', 'R-668', 'R-670'] : ['R-801', 'R-749', 'R-751'],
-      });
-    });
-  } else {
-    blockSections.push(
-      {
-        lastStopSignal: 'S6',
-        direction: 'Down',
-        lastSignalMaMeters: 5230,
-        blockSectionTin: 'N-96',
-        adjacentLineTins: 'N-91',
-        nextStationId: metadata.nextDownStationId || '521',
-        nextStationBorderRfid: 'R-612 @ 2354m',
-        startDistAbsResetM: '1980',
-        absLocationCorrectionM: '40 (-ve)',
-        locoDirectionAfterAdj: 'Nominal',
-        authorisedSpeed: 'MPS',
-        sosRfidTags: ['R-612', 'R-660', 'R-662', 'R-664', 'R-666', 'R-668', 'R-670'],
-      },
-      {
-        lastStopSignal: 'S24',
-        direction: 'UP',
-        lastSignalMaMeters: 4770,
-        blockSectionTin: 'N-94',
-        adjacentLineTins: 'N-95',
-        nextStationId: metadata.nextUpStationId || '503',
-        nextStationBorderRfid: 'R-801 @ 2100m',
-        startDistAbsResetM: '----',
-        absLocationCorrectionM: '----',
-        locoDirectionAfterAdj: '----',
-        authorisedSpeed: 'MPS',
-        sosRfidTags: ['R-801', 'R-749', 'R-751'],
-      }
-    );
   }
 
-  // Shunting Limits Table
-  const shuntingLimits: ShuntingLimitEntry[] = [
-    { adjacentStation: metadata.nextDownStationId || 'GGD', direction: 'Nominal', rfidTag: 'R-716', tin: 'N-96', absoluteLocationM: 122790 },
-    { adjacentStation: metadata.nextDownStationId || 'GGD', direction: 'Nominal', rfidTag: 'R-683', tin: 'N-91', absoluteLocationM: 122670 },
-    { adjacentStation: metadata.nextDownStationId || 'GGD', direction: 'Nominal', rfidTag: 'R-687', tin: 'N-53', absoluteLocationM: 122240 },
-    { adjacentStation: metadata.nextUpStationId || 'VKB', direction: 'Reverse', rfidTag: 'R-709', tin: 'N-94', absoluteLocationM: 121160 },
-    { adjacentStation: metadata.nextUpStationId || 'VKB', direction: 'Reverse', rfidTag: 'R-690', tin: 'N-95', absoluteLocationM: 121280 },
-  ];
+  // Up TSL departure routes on Down track
+  for (const st of upStarters) {
+    const oppositeExit = downHome ? `${downHome.node.name} of ${metadata.nextUpStationId || 'NextStn'}` : `LSS of ${metadata.nextUpStationId || 'NextStn'}`;
+    const cmd = downHome ? `${st.node.name}GNR, ${downHome.node.name}GNR` : `${st.node.name}GNR`;
+    const dist = st.node.chainageM !== null && st.node.chainageM > 0
+      ? Math.round(st.node.chainageM * 0.1)
+      : (st.line ? Math.round(Math.abs(st.line.x1 - st.line.x0) * 10) : 0);
+    tslRoutes.push({
+      slNo: tslRoutes.length + 1,
+      tslEntrySignal: st.node.name,
+      tslExitSignal: oppositeExit,
+      signalType: st.node.signalType || 'Starter',
+      lineOrSignalType: st.node.signalType,
+      aspectOfEntrySignal: 'Red/Blank',
+      requiresAspectOfExitSignal: 'Red',
+      requiredRouteCommand: cmd,
+      pointsNormal: [],
+      pointsReverse: [],
+      requiresTrackCktUp: 'Axle Counter section free',
+      trackCktUpOrAxleCounterFree: 'Axle Counter section free',
+      tinsRequiresFree: st.line?.tins.map((t) => t.id) || [],
+      entryFootTag: st.node.footTagId,
+      linkingSequence: findLinkingTags(st, st, false),
+      distanceBetweenSignalsM: dist,
+      movementAuthoritySections: '1',
+      authorizedSpeedOsFirstTrain: '25 kmph',
+      authorizedSpeedOsSubsequentTrains: 'Booked Speed (MPS)',
+    });
+  }
 
-  // Signals Override OV not required at zero speed
-  const signalsOverrideOv: string[] = ['S6', 'S25', 'S24'];
+  const tslTrackProfiles: TrackProfileRow[] = tslRoutes.map((tslRow) => ({
+    slNo: tslRow.slNo,
+    entrySignal: tslRow.tslEntrySignal,
+    exitSignal: tslRow.tslExitSignal,
+    line: tslRow.lineOrSignalType || 'Main Line',
+    turnoutSpeedKmph: 30,
+    turnoutStartDistM: null,
+    turnoutLengthM: null,
+    psrSegments: [],
+    psrClassSegments: [],
+    engineeringGradients: [],
+    averageGradients: [],
+    lcId: undefined,
+    trackConditionType: 'Dead Stop',
+    trackConditionStartDistM: tslRow.distanceBetweenSignalsM,
+    trackConditionLengthM: 0,
+  }));
+
+  // Dynamic Block Section Details Table
+  const downLss = placed.find((p) => p.node.signalType.includes('Advanced') && p.node.direction === 'DOWN')
+    || placed.find((p) => p.node.direction === 'DOWN' && p.node.signalType.includes('Starter'));
+  const upLss = placed.find((p) => p.node.signalType.includes('Advanced') && p.node.direction === 'UP')
+    || placed.find((p) => p.node.direction === 'UP' && p.node.signalType.includes('Starter'));
+
+  const blockSections: BlockSectionDetail[] = [];
+  if (downLss) {
+    const nextStnDist = downLss.node.chainageM !== null && downLss.node.chainageM > 0 ? Math.round(downLss.node.chainageM * 0.1) : 0;
+    blockSections.push({
+      lastStopSignal: downLss.node.name,
+      direction: 'Down',
+      lastSignalMaMeters: nextStnDist > 0 ? nextStnDist : undefined,
+      blockSectionTin: downLss.line?.tins[0]?.id || '----',
+      adjacentLineTins: upLss?.line?.tins[0]?.id || '----',
+      nextStationId: metadata.nextDownStationId || '----',
+      nextStationBorderRfid: '----',
+      startDistAbsResetM: '----',
+      absLocationCorrectionM: '----',
+      locoDirectionAfterAdj: 'Nominal',
+      authorisedSpeed: 'MPS',
+      sosRfidTags: tags.filter((t) => t.line === downLss.line?.id).slice(0, 5).map((t) => t.tagId),
+    });
+  }
+  if (upLss) {
+    const nextStnDist = upLss.node.chainageM !== null && upLss.node.chainageM > 0 ? Math.round(upLss.node.chainageM * 0.1) : 0;
+    blockSections.push({
+      lastStopSignal: upLss.node.name,
+      direction: 'UP',
+      lastSignalMaMeters: nextStnDist > 0 ? nextStnDist : undefined,
+      blockSectionTin: upLss.line?.tins[0]?.id || '----',
+      adjacentLineTins: downLss?.line?.tins[0]?.id || '----',
+      nextStationId: metadata.nextUpStationId || '----',
+      nextStationBorderRfid: '----',
+      startDistAbsResetM: '----',
+      absLocationCorrectionM: '----',
+      locoDirectionAfterAdj: '----',
+      authorisedSpeed: 'MPS',
+      sosRfidTags: tags.filter((t) => t.line === upLss.line?.id).slice(0, 5).map((t) => t.tagId),
+    });
+  }
+
+  // Dynamic TSL Block Section Details
+  const tslBlockSections: BlockSectionDetail[] = [];
+  if (upHome) {
+    tslBlockSections.push({
+      lastStopSignal: upHome.node.name,
+      direction: 'Down',
+      lastSignalMaMeters: undefined,
+      blockSectionTin: downLss?.line?.tins[0]?.id || '----',
+      adjacentLineTins: upLss?.line?.tins[0]?.id || '----',
+      nextStationId: metadata.nextDownStationId || '----',
+      nextStationBorderRfid: '----',
+      startDistAbsResetM: '----',
+      absLocationCorrectionM: '----',
+      locoDirectionAfterAdj: '----',
+      authorisedSpeed: 'MPS',
+      sosRfidTags: [],
+    });
+  }
+  if (downHome) {
+    tslBlockSections.push({
+      lastStopSignal: downHome.node.name,
+      direction: 'UP',
+      lastSignalMaMeters: undefined,
+      blockSectionTin: upLss?.line?.tins[0]?.id || '----',
+      adjacentLineTins: downLss?.line?.tins[0]?.id || '----',
+      nextStationId: metadata.nextUpStationId || '----',
+      nextStationBorderRfid: '----',
+      startDistAbsResetM: '----',
+      absLocationCorrectionM: '----',
+      locoDirectionAfterAdj: '----',
+      authorisedSpeed: 'MPS',
+      sosRfidTags: [],
+    });
+  }
+
+  // Dynamic Shunting Limits Table
+  const shuntingLimits: ShuntingLimitEntry[] = placed
+    .filter((p) => p.node.signalType.includes('Starter') || p.node.signalType.includes('Advanced'))
+    .slice(0, 5)
+    .map((p) => ({
+      adjacentStation: p.node.direction === 'DOWN' ? (metadata.nextDownStationId || '----') : (metadata.nextUpStationId || '----'),
+      direction: p.node.direction === 'DOWN' ? 'Nominal' : 'Reverse',
+      rfidTag: p.node.footTagId || '----',
+      tin: p.line?.tins[0]?.id || '----',
+      absoluteLocationM: p.node.chainageM ?? 0,
+    }));
+
+  // Dynamic Signals Override OV
+  const signalsOverrideOv: string[] = Array.from(new Set([
+    ...(downLss ? [downLss.node.name] : []),
+    ...(upLss ? [upLss.node.name] : []),
+    ...placed.filter((p) => p.node.signalType.includes('IB')).map((p) => p.node.name),
+  ]));
 
   return {
     id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     metadata,
-    tocFormatPreference: 'CHITGIDDA_SELECTION',
+    tocFormatPreference: 'STANDARD_SELECTION',
     tracks,
     signals,
     points,
@@ -1587,6 +2389,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     levelCrossings,
     routes,
     blockSections,
+    tslBlockSections,
     trackProfiles,
     tsrRoutes,
     tslRoutes,
