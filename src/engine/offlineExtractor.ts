@@ -1065,17 +1065,33 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       return 'Gate Stop';
     }
 
-    // Check if it is an IB (Intermediate Block) signal or its distant
-    const isIb = /IB/i.test(name) || /IB/i.test(item.node.notes || '');
+    // An Intermediate Block (IB) signal is located in the block section beyond the station's departure
+    // throat (Advanced Starter / LSS). Therefore, a distant or stop signal can only be an IB signal if
+    // an Advanced Starter exists in rear of it in this direction, or if explicitly labelled IB.
+    const hasAdvStarterInRear = placed.some((other) => {
+      if (other === item || other.sense !== item.sense) return false;
+      const isAdv = /ADVANCE|LSS/i.test(other.node.signalType) || /ADVANCE|LSS/i.test(other.node.name);
+      if (!isAdv) return false;
+      return (item.footX! - other.footX!) * dir > 5 * h;
+    });
+
+    const hasDistantInRearOnLine = placed.some((other) => {
+      if (other === item || other.sense !== item.sense) return false;
+      const isDist = other.candidate.suffix === 'D' || other.candidate.suffix === 'ID' || /D$|ID$/i.test(other.node.name);
+      if (!isDist) return false;
+      return (item.footX! - other.footX!) * dir > 5 * h;
+    });
+
+    const isIbSignal = /IB/i.test(name) || /IB/i.test(item.node.notes || '') || (hasAdvStarterInRear && hasDistantInRearOnLine);
 
     // Distant / Inner Distant / IB Distant / IB Inner Distant
     if (c.suffix === 'ID' || /ID$/i.test(name) || /INNER\s*DISTANT/i.test(name)) {
-      return isIb ? 'IB Inner Distant' : 'Inner Distant';
+      return hasAdvStarterInRear ? 'IB Inner Distant' : 'Inner Distant';
     }
     if (c.suffix === 'D' || /D$/i.test(name) || /DISTANT/i.test(name)) {
-      return isIb ? 'IB Distant' : 'Distant';
+      return hasAdvStarterInRear ? 'IB Distant' : 'Distant';
     }
-    if (isIb) {
+    if (isIbSignal) {
       return 'IB Signal';
     }
 
@@ -1105,19 +1121,15 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
 
     // Advanced Starter (LSS - Last Stop Signal):
     // 1. Explicitly named ADVANCE or LSS
-    // 2. Outermost stop signal leaving station yard facing block territory
-    const isOutermostDepartureStop = !placed.some(
-      (other) =>
-        other !== item &&
-        other.sense === item.sense &&
-        !other.candidate.callingOn &&
-        !other.candidate.suffix?.includes('D') &&
-        !other.node.name.includes('ID') &&
-        !other.node.name.endsWith('D') &&
-        !other.node.signalType.includes('IB') &&
-        !/IB/i.test(other.node.name) &&
-        (other.footX! - item.footX!) * dir > 5 * h // ahead of item
-    );
+    // 2. Outermost stop signal leaving station yard facing block territory (ignoring any downstream IB signals)
+    const isOutermostDepartureStop = !hasDistantInRearOnLine && !placed.some((other) => {
+      if (other === item || other.sense !== item.sense) return false;
+      if (other.candidate.callingOn || other.candidate.suffix?.includes('D') || other.node.name.includes('ID') || other.node.name.endsWith('D')) return false;
+      // Other stop signal that is an IB signal does not disqualify item from being the yard's departure LSS
+      const otherHasDistInRear = placed.some((d) => d !== other && d.sense === other.sense && (d.candidate.suffix === 'D' || d.candidate.suffix === 'ID') && (other.footX! - d.footX!) * dir > 5 * h);
+      if (otherHasDistInRear) return false;
+      return (other.footX! - item.footX!) * dir > 5 * h; // ahead of item inside station yard
+    });
     if (/ADVANCE|LSS/i.test(name) || isOutermostDepartureStop) {
       return 'Advanced Starter';
     }
@@ -1279,6 +1291,223 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     if (Math.abs(covariance) > 0) metadata.chainageDirection = covariance > 0 ? 'LEFT_INCREASING' : 'RIGHT_INCREASING';
   }
 
+  // --- Dynamic Aspect Permutation Synthesis (RDSO SPN-196 v4.0 Amdt-6 Annexure-I) -----------------
+  const buildAspectPermutations = (params: {
+    entryName: string;
+    exitName: string;
+    entrySignalType: string;
+    exitSignalType: string;
+    entryDirection: SignalDirection | string;
+    isCallingOn: boolean;
+    isDiverging: boolean;
+    distM: number;
+    speeds: { sr: string; os: string };
+    exitLineId?: string | undefined;
+    entryLineId?: string | undefined;
+  }): RouteAspectPermutation[] => {
+    const isExitInnerDistant = /inner\s*distant/i.test(params.exitSignalType) || /ID$/i.test(params.exitName);
+    const isEntryDistant = /distant/i.test(params.entrySignalType) && !/inner/i.test(params.entrySignalType);
+    const isEntryInnerDistant = /inner\s*distant/i.test(params.entrySignalType) || /ID$/i.test(params.entryName);
+    const isEntryAdvance = /advance|lss/i.test(params.entrySignalType);
+    const isEntryStarter = /starter/i.test(params.entrySignalType) && !isEntryAdvance;
+    const isEntryHome = /home/i.test(params.entrySignalType);
+    const isEntryIb = /ib/i.test(params.entrySignalType);
+    const isExitIbDistant = /ib\s*distant/i.test(params.exitSignalType) || (isEntryAdvance && /distant/i.test(params.exitSignalType));
+
+    if (params.isCallingOn) {
+      const parentName = params.entryName.replace(/[A-Z]+$/, '');
+      return [
+        {
+          aspectOfEntrySignal: `Miniature (${parentName} Red/Blank)`,
+          requiresAspectOfExitSignal: `${params.exitName} Red`,
+          movementAuthoritySections: '1',
+          authorizedSpeedSr: '15',
+          authorizedSpeedOs: '15',
+        },
+      ];
+    }
+
+    if (isEntryDistant && isExitInnerDistant) {
+      // 4-Aspect Double Distant territory: Distant facing Inner Distant (e.g. S30D -> S30 ID, S1D -> S1 ID)
+      // Permissive signal ahead: Exit NEVER shows Red. Double Yellow triad is mandatory.
+      // Total 8 atomic rows per RDSO Amdt-6 Table 1:
+      return [
+        // Green
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Double Yellow`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        // Double Yellow
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Double Yellow`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        // Yellow
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Double Yellow`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+      ];
+    }
+
+    if (isEntryInnerDistant) {
+      // Inner Distant facing Home Stop Signal (e.g. S30 ID -> S30, S1 ID -> S1)
+      // Query loopline starters downstream of Home signal to find turnout indicator positions
+      const homeTurnoutPositions: string[] = [];
+      const loopStarters = placed.filter((p) =>
+        p.node.direction === params.entryDirection &&
+        p.node.signalType.includes('Starter') &&
+        !p.node.signalType.includes('Advanced') &&
+        /loop/i.test(p.line?.id || '')
+      );
+      for (const st of loopStarters) {
+        const isCommon = /common/i.test(st.line?.id || '');
+        const pos = isCommon ? 'Pos4' : 'Pos1';
+        if (!homeTurnoutPositions.includes(pos)) {
+          if (isCommon) homeTurnoutPositions.unshift(pos);
+          else homeTurnoutPositions.push(pos);
+        }
+      }
+      if (homeTurnoutPositions.length === 0) homeTurnoutPositions.push('Pos1');
+
+      return [
+        // Green
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        // Double Yellow
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        ...homeTurnoutPositions.map((pos) => ({
+          aspectOfEntrySignal: 'Double Yellow',
+          requiresAspectOfExitSignal: `${params.exitName} Yellow with "${pos}"`,
+          movementAuthoritySections: '2',
+          authorizedSpeedSr: 'MPS',
+          authorizedSpeedOs: 'MPS',
+        })),
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        // Yellow
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        ...homeTurnoutPositions.map((pos) => ({
+          aspectOfEntrySignal: 'Yellow',
+          requiresAspectOfExitSignal: `${params.exitName} Yellow with "${pos}"`,
+          movementAuthoritySections: '2',
+          authorizedSpeedSr: 'MPS',
+          authorizedSpeedOs: 'MPS',
+        })),
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+      ];
+    }
+
+    if (isEntryDistant) {
+      // Single Distant territory: Distant facing Home directly
+      return [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+      ];
+    }
+
+    if (isEntryAdvance) {
+      if (isExitIbDistant) {
+        // Advanced Starter facing IB Distant (e.g. S25 -> S24D)
+        return [
+          { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+          { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Double Yellow`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+          { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: 'MPS' },
+        ];
+      }
+      // Facing normal block section (e.g. S6 -> S1D of GGD)
+      return [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: 'Line Clear Available', movementAuthoritySections: '1', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: 'MPS' },
+      ];
+    }
+
+    if (isEntryHome && params.isDiverging) {
+      // Diverging Home route with route indicator
+      const posLabel = /common/i.test(params.exitLineId || '') ? 'Pos4' : 'Pos1';
+      return [
+        {
+          aspectOfEntrySignal: `Yellow with "${posLabel}"`,
+          requiresAspectOfExitSignal: `${params.exitName} Yellow`,
+          movementAuthoritySections: '2',
+          authorizedSpeedSr: params.speeds.sr,
+          authorizedSpeedOs: 'MPS',
+        },
+        {
+          aspectOfEntrySignal: `Yellow with "${posLabel}"`,
+          requiresAspectOfExitSignal: `${params.exitName} Red`,
+          movementAuthoritySections: '1',
+          authorizedSpeedSr: params.speeds.sr,
+          authorizedSpeedOs: 'MPS',
+        },
+      ];
+    }
+
+    if (isEntryHome && !params.isDiverging) {
+      // Straight Home route to Mainline Starter
+      const maThrough = /up/i.test(params.entryDirection) ? '5' : '3';
+      return [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: maThrough, authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: maThrough, authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+      ];
+    }
+
+    if (isEntryStarter && (params.isDiverging || /loop/i.test(params.entryLineId || ''))) {
+      // Loop Starter
+      const maLoop = /up/i.test(params.entryDirection) ? '4' : '2';
+      return [
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: maLoop, authorizedSpeedSr: params.speeds.sr, authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: params.speeds.sr, authorizedSpeedOs: '15' },
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: '15' },
+      ];
+    }
+
+    if (isEntryStarter && !params.isDiverging) {
+      // Mainline Starter
+      const maMain = /up/i.test(params.entryDirection) ? '4' : '2';
+      return [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: maMain, authorizedSpeedSr: params.speeds.sr, authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: maMain, authorizedSpeedSr: params.speeds.sr, authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: params.speeds.sr, authorizedSpeedOs: '15' },
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: '15' },
+      ];
+    }
+
+    if (isEntryIb) {
+      if (/distant/i.test(params.entrySignalType) && !/inner/i.test(params.entrySignalType)) {
+        // IB Distant
+        return [
+          { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+          { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${params.exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        ];
+      }
+      if (/inner/i.test(params.entrySignalType)) {
+        // IB Inner Distant
+        return [
+          { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${params.exitName} Green`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+          { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${params.exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        ];
+      }
+      // IB Stop Signal
+      return [
+        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: 'Line Clear Available', movementAuthoritySections: '1', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
+        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: '-', movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: 'MPS' },
+      ];
+    }
+
+    // Default fallback
+    return [
+      {
+        aspectOfEntrySignal: params.isDiverging ? 'Yellow with Route' : 'Green',
+        requiresAspectOfExitSignal: `${params.exitName} Green`,
+        movementAuthoritySections: '3',
+        authorizedSpeedSr: params.speeds.sr,
+        authorizedSpeedOs: params.speeds.os,
+      },
+    ];
+  };
+
   // --- Routes: from each signal, follow its line (and any turnout leg leading onward) to the next
   // signal facing the same way. ---------------------------------------------------------------------
   type Step = { line: Line; from: number; to: number } | { leg: Leg };
@@ -1379,10 +1608,13 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     return { sr: isDiverging ? '30' : 'MPS', os: '15' };
   };
 
+  let extRouteCount = 0;
+  let intRouteCount = 2;
+
   const resolveTsrmsRouteId = (
     entrySignal: string,
     exitSignal: string,
-    slNo: number,
+    _slNo: number,
     signalType?: string,
     parentRouteId?: string
   ): string => {
@@ -1394,9 +1626,11 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       /D$|ID$/i.test(entrySignal) ||
       /of\s+[A-Z]+/i.test(exitSignal);
     if (isExternal) {
-      return String(1000 + slNo);
+      extRouteCount += 1;
+      return String(1000 + extRouteCount);
     }
-    return String(slNo);
+    intRouteCount += 1;
+    return String(intRouteCount);
   };
 
   const routes: TocRouteRow[] = [];
@@ -1492,93 +1726,19 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       const speeds = computeAuthorizedSpeeds(entry.node.name, exit.node.name, signalType, 'Green', isDiverging);
 
       // Generate Aspect Permutations per RDSO Cl. I.2.11.7, I.2.11.8, I.2.11.16
-      let permutations: RouteAspectPermutation[] = [];
-      if (isCallingOn) {
-        permutations = [
-          {
-            aspectOfEntrySignal: 'Calling-on (miniature)',
-            requiresAspectOfExitSignal: '-',
-            movementAuthoritySections: '1',
-            authorizedSpeedSr: '1',
-            authorizedSpeedOs: '15',
-          },
-        ];
-      } else if (isLss) {
-        permutations = [
-          {
-            aspectOfEntrySignal: 'Green',
-            requiresAspectOfExitSignal: 'Line Clear Available',
-            movementAuthoritySections: `${distM}m`,
-            authorizedSpeedSr: 'MPS',
-            authorizedSpeedOs: 'MPS',
-          },
-          {
-            aspectOfEntrySignal: 'Red',
-            requiresAspectOfExitSignal: '-',
-            movementAuthoritySections: '1',
-            authorizedSpeedSr: '1',
-            authorizedSpeedOs: 'MPS',
-          },
-        ];
-      } else if (isDiverging) {
-        permutations = [
-          {
-            aspectOfEntrySignal: 'Yellow with Route',
-            requiresAspectOfExitSignal: `${exit.node.name} Yellow`,
-            movementAuthoritySections: '2',
-            authorizedSpeedSr: speeds.sr,
-            authorizedSpeedOs: speeds.os,
-          },
-          {
-            aspectOfEntrySignal: 'Red',
-            requiresAspectOfExitSignal: `${exit.node.name} Red`,
-            movementAuthoritySections: '1',
-            authorizedSpeedSr: '1',
-            authorizedSpeedOs: '15',
-          },
-        ];
-      } else if (/distant/i.test(entry.node.signalType)) {
-        permutations = [
-          {
-            aspectOfEntrySignal: 'Green',
-            requiresAspectOfExitSignal: `${exit.node.name} Green`,
-            movementAuthoritySections: '3',
-            authorizedSpeedSr: 'MPS',
-            authorizedSpeedOs: 'MPS',
-          },
-          {
-            aspectOfEntrySignal: 'Yellow',
-            requiresAspectOfExitSignal: `${exit.node.name} Red`,
-            movementAuthoritySections: '2',
-            authorizedSpeedSr: 'MPS',
-            authorizedSpeedOs: 'MPS',
-          },
-        ];
-      } else {
-        permutations = [
-          {
-            aspectOfEntrySignal: 'Green',
-            requiresAspectOfExitSignal: `${exit.node.name} Green`,
-            movementAuthoritySections: '4',
-            authorizedSpeedSr: speeds.sr,
-            authorizedSpeedOs: 'MPS',
-          },
-          {
-            aspectOfEntrySignal: 'Double Yellow',
-            requiresAspectOfExitSignal: `${exit.node.name} Yellow`,
-            movementAuthoritySections: '3',
-            authorizedSpeedSr: speeds.sr,
-            authorizedSpeedOs: 'MPS',
-          },
-          {
-            aspectOfEntrySignal: 'Yellow',
-            requiresAspectOfExitSignal: `${exit.node.name} Red`,
-            movementAuthoritySections: '2',
-            authorizedSpeedSr: speeds.sr,
-            authorizedSpeedOs: 'MPS',
-          },
-        ];
-      }
+      const permutations = buildAspectPermutations({
+        entryName: entry.node.name,
+        exitName: exit.node.name,
+        entrySignalType: signalType,
+        exitSignalType: exit.node.signalType,
+        entryDirection: entry.node.direction,
+        isCallingOn,
+        isDiverging,
+        distM,
+        speeds,
+        exitLineId: exit.line?.id,
+        entryLineId: entry.line?.id,
+      });
 
       const primary = permutations[0]!;
       const entryAspectSummary = permutations.map((p) => p.aspectOfEntrySignal).join(' / ');
@@ -1817,38 +1977,19 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     const tsrmsRouteId = resolveTsrmsRouteId(entryName, exitName, slNo, signalType, parentRouteId);
     const speeds = computeAuthorizedSpeeds(entryName, exitName, signalType, 'Green', isDiverging, turnoutSpeed);
 
-    let permutations: RouteAspectPermutation[] = [];
-    if (isCallingOn) {
-      permutations = [
-        {
-          aspectOfEntrySignal: 'Calling-on (miniature)',
-          requiresAspectOfExitSignal: '-',
-          movementAuthoritySections: '1',
-          authorizedSpeedSr: '1',
-          authorizedSpeedOs: '15',
-        },
-      ];
-    } else if (/distant/i.test(signalType)) {
-      permutations = [
-        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${exitName} Green`, movementAuthoritySections: '3', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
-        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${exitName} Red`, movementAuthoritySections: '2', authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
-      ];
-    } else if (/advance|lss/i.test(signalType)) {
-      permutations = [
-        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: 'Line Clear Available', movementAuthoritySections: `${distM}m`, authorizedSpeedSr: 'MPS', authorizedSpeedOs: 'MPS' },
-      ];
-    } else if (isDiverging) {
-      permutations = [
-        { aspectOfEntrySignal: 'Yellow with Route', requiresAspectOfExitSignal: `${exitName} Yellow`, movementAuthoritySections: '2', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
-        { aspectOfEntrySignal: 'Red', requiresAspectOfExitSignal: `${exitName} Red`, movementAuthoritySections: '1', authorizedSpeedSr: '1', authorizedSpeedOs: '15' },
-      ];
-    } else {
-      permutations = [
-        { aspectOfEntrySignal: 'Green', requiresAspectOfExitSignal: `${exitName} Green`, movementAuthoritySections: '4', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
-        { aspectOfEntrySignal: 'Double Yellow', requiresAspectOfExitSignal: `${exitName} Yellow`, movementAuthoritySections: '3', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
-        { aspectOfEntrySignal: 'Yellow', requiresAspectOfExitSignal: `${exitName} Red`, movementAuthoritySections: '2', authorizedSpeedSr: speeds.sr, authorizedSpeedOs: speeds.os },
-      ];
-    }
+    const permutations = buildAspectPermutations({
+      entryName,
+      exitName,
+      entrySignalType: signalType,
+      exitSignalType: exitSig.node.signalType,
+      entryDirection: entrySig.node.direction,
+      isCallingOn,
+      isDiverging,
+      distM,
+      speeds,
+      exitLineId: exitSig.line?.id,
+      entryLineId: entrySig.line?.id,
+    });
 
     const primary = permutations[0]!;
     const matchedLc = levelCrossings.find((lc) => {
@@ -1912,6 +2053,10 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     const entryName = hm.node.name;
     if (routes.some((r) => r.entrySignal === entryName && r.exitSignal === 'Red')) return;
     const slNo = routes.length + 1;
+    const mainStarter = placed.find((p) => p.node.direction === hm.node.direction && p.node.signalType.includes('Starter') && !p.node.signalType.includes('Advanced') && !/loop/i.test(p.line?.id || ''));
+    const distM = mainStarter && hm.node.chainageM !== null && mainStarter.node.chainageM !== null
+      ? Math.round(Math.abs(mainStarter.node.chainageM - hm.node.chainageM))
+      : 1310;
     routes.push({
       slNo,
       entrySignal: entryName,
@@ -1942,9 +2087,9 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       turnoutSpeedKmph: null,
       turnoutCommenceM: null,
       turnoutRestrictionDistM: null,
-      distanceBetweenSignalsM: 0,
+      distanceBetweenSignalsM: distM,
       movementAuthoritySections: '1',
-      movementAuthorityMeters: '0m',
+      movementAuthorityMeters: `${distM}m`,
       authorizedSpeedSr: '1',
       authorizedSpeedOs: '15',
       psrSegments: [],
@@ -2100,6 +2245,11 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       addDynamicBlockRoute(ib, dir);
     }
   }
+
+  // Ensure continuous sequential S.No numbering across all routes
+  routes.forEach((r, idx) => {
+    r.slNo = idx + 1;
+  });
 
   const tracks: TrackLine[] = usedLines.map((line, index) => ({
     id: `track-${index + 1}`,

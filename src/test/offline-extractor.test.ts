@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { extractOfflineProject, type LayoutToken } from '@/engine/offlineExtractor';
 
 const sourceLayout = { kind: 'PDF' as const, fileName: 'station-a.pdf' };
@@ -136,5 +138,53 @@ describe('offline drawing extraction', () => {
     const approachRoute = project.routes.find((r) => r.entrySignal === 'S30 ID');
     expect(approachRoute).toBeDefined();
     expect(approachRoute!.exitSignal).toBe('S30');
+  });
+
+  it('synthesizes 8 aspect rows for a 4-aspect Distant in Double Distant territory without any Red exit aspects', () => {
+    const tokens: LayoutToken[] = [
+      track(0, 800, 100),
+      text('DN', 26, 103.5), text('MAIN', 31, 103.5),
+      text('UP', 300, 20), text('DOWN', 320, 20),
+      text('R-101', 50, 102.8), text('10.000', 50, 105.2),
+      text('R-102', 150, 102.8), text('11.000', 150, 105.2),
+      text('R-103', 250, 102.8), text('12.000', 250, 105.2),
+      ring(58, 94), ring(60.6, 94), text('1D', 59, 91),
+      ring(158, 94), ring(160.6, 94), text('1ID', 159, 91),
+      ring(258, 94), ring(260.6, 94), text('1', 259, 91),
+    ];
+    const project = extractOfflineProject({ fileName: 'test.pdf', sourceLayout, tokens });
+    const distantRoute = project.routes.find((r) => r.entrySignal === 'S1D');
+    expect(distantRoute).toBeDefined();
+    expect(distantRoute!.exitSignal).toBe('S1 ID');
+    expect(distantRoute!.aspectPermutations).toHaveLength(8);
+    const aspects = distantRoute!.aspectPermutations!.map((p) => p.aspectOfEntrySignal);
+    expect(aspects).toEqual([
+      'Green', 'Green',
+      'Double Yellow', 'Double Yellow', 'Double Yellow',
+      'Yellow', 'Yellow', 'Yellow'
+    ]);
+    const mas = distantRoute!.aspectPermutations!.map((p) => p.movementAuthoritySections);
+    expect(mas).toEqual(['3', '3', '3', '3', '2', '3', '3', '2']);
+    for (const p of distantRoute!.aspectPermutations!) {
+      expect(p.requiresAspectOfExitSignal).not.toContain('Red');
+    }
+  });
+
+  it('strictly contains zero hardcoded station names, fixed signal IDs or chainages in engine logic', () => {
+    const filesToAudit = [
+      path.resolve(__dirname, '../engine/offlineExtractor.ts'),
+      path.resolve(__dirname, '../utils/exportToc.ts'),
+    ];
+    const forbiddenPatterns = [
+      /\bCHITGIDDA\b/i,
+      /\bCTF\b/,
+      /\b122790\b/,
+    ];
+    for (const filePath of filesToAudit) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      for (const pattern of forbiddenPatterns) {
+        expect(content).not.toMatch(pattern);
+      }
+    }
   });
 });

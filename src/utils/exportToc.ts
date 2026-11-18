@@ -48,7 +48,10 @@ export function exportTocToExcel(
           },
         ];
 
+    let prevAspect = '';
     permutations.forEach((perm, pIdx) => {
+      const showAspect = perm.aspectOfEntrySignal !== prevAspect;
+      prevAspect = perm.aspectOfEntrySignal;
       tocRows.push({
         'S.No': pIdx === 0 ? r.slNo : '',
         'Entry Signal': pIdx === 0 ? r.entrySignal : '',
@@ -57,7 +60,7 @@ export function exportTocToExcel(
         'TSRMS Route ID': pIdx === 0 ? (r.tsrmsRouteId || String(r.slNo)) : '',
         'Section Type': pIdx === 0 ? (r.sectionType || 'Station Section') : '',
         'Signal Type': pIdx === 0 ? r.signalType : '',
-        'Aspect of Entry Signal': perm.aspectOfEntrySignal,
+        'Aspect of Entry Signal': showAspect ? perm.aspectOfEntrySignal : '',
         'Requires Aspects of Exit Signal': perm.requiresAspectOfExitSignal,
         'Required Route Locking': pIdx === 0 ? (r.requiredRouteLocking || '-') : '',
         'Points in Route (Normal)': pIdx === 0 ? (r.pointsNormal.join(', ') || '-') : '',
@@ -77,7 +80,7 @@ export function exportTocToExcel(
   }
   const wsToc = XLSX.utils.json_to_sheet(tocRows);
 
-  if (selectedSection === 'selection' || selectedSection === 'all') {
+  if (selectedSection === 'all') {
     const blockSectionDetails = project.blockSections || [];
     if (blockSectionDetails.length > 0) {
       const blockRows = blockSectionDetails.map((b) => ({
@@ -693,7 +696,11 @@ export function exportTocToPdf(
             },
           ];
 
-      return permutations.map((p, pIdx) => `
+      let prevAspect = '';
+      return permutations.map((p, pIdx) => {
+        const showAspect = p.aspectOfEntrySignal !== prevAspect;
+        prevAspect = p.aspectOfEntrySignal;
+        return `
         <tr>
           <td class="text-center mono bold">${pIdx === 0 ? r.slNo : ''}</td>
           <td class="mono bold text-center">${pIdx === 0 ? r.entrySignal : ''}</td>
@@ -702,7 +709,7 @@ export function exportTocToPdf(
           <td class="text-center mono">${pIdx === 0 ? (r.tsrmsRouteId || r.slNo) : ''}</td>
           <td>${pIdx === 0 ? (r.sectionType || 'Station Section') : ''}</td>
           <td>${pIdx === 0 ? r.signalType : ''}</td>
-          <td class="bold text-center">${p.aspectOfEntrySignal}</td>
+          <td class="bold text-center">${showAspect ? p.aspectOfEntrySignal : ''}</td>
           <td class="text-center">${p.requiresAspectOfExitSignal}</td>
           <td class="mono text-center bold">${pIdx === 0 ? (r.requiredRouteLocking || '-') : ''}</td>
           <td class="mono text-center">${pIdx === 0 ? (r.pointsNormal.join(', ') || '-') : ''}</td>
@@ -716,33 +723,66 @@ export function exportTocToPdf(
           <td class="mono text-right bold">${pIdx === 0 ? r.distanceBetweenSignalsM : ''}</td>
           <td class="mono text-center bold">${p.movementAuthoritySections}</td>
           <td class="mono text-center bold">${pIdx === 0 ? (r.authorizedSpeedSr || p.authorizedSpeedSr || 'MPS') : (p.authorizedSpeedSr || '')}</td>
-          <td class="mono text-center bold">${p.authorizedSpeedOs}</td>
+          <td class="mono text-center bold">${p.authorizedSpeedOs || r.authorizedSpeedOs || 'MPS'}</td>
         </tr>
-      `).join('');
+      `;
+      }).join('');
     }).join('');
   };
 
   // Dynamic Route Subsets for Paged Printing
-  const allRoutes = project.routes;
-  const numChunks = Math.max(1, Math.min(5, Math.ceil(allRoutes.length / 5)));
-  const t1Chunks = Array.from({ length: numChunks }, (_, i) => {
-    const start = Math.floor((i * allRoutes.length) / numChunks);
-    const end = Math.floor(((i + 1) * allRoutes.length) / numChunks);
-    return allRoutes.slice(start, end);
-  }).filter((chunk) => chunk.length > 0);
-  if (t1Chunks.length === 0) t1Chunks.push([]);
+  // Dynamically chunk routes by rendered aspect permutation rows (19-22 rows per page)
+  // to eliminate empty white space and ensure proper continuous page filling.
+  const chunkRoutesForPrint = (routes: typeof project.routes, targetRowsPerPage = 21): (typeof project.routes)[] => {
+    if (!routes || routes.length === 0) return [[]];
+    const pages: (typeof project.routes)[] = [];
+    let currentPage: typeof project.routes = [];
+    let currentRows = 0;
 
-  // Table 2 subsets
+    for (const r of routes) {
+      const rRows = r.aspectPermutations && r.aspectPermutations.length > 0
+        ? r.aspectPermutations.length
+        : 1;
+
+      if (currentPage.length > 0 && currentRows + rRows > targetRowsPerPage + 2) {
+        pages.push(currentPage);
+        currentPage = [r];
+        currentRows = rRows;
+      } else {
+        currentPage.push(r);
+        currentRows += rRows;
+      }
+    }
+
+    if (currentPage.length > 0) {
+      pages.push(currentPage);
+    }
+    return pages;
+  };
+
+  const t1Chunks = chunkRoutesForPrint(project.routes, 21);
+
+  // Table 2 subsets (pack 18-20 track profile rows per page)
   const allTp = project.trackProfiles || [];
-  const halfTp = Math.ceil(allTp.length / 2);
-  const tp1 = allTp.slice(0, halfTp);
-  const tp2 = allTp.slice(halfTp);
+  const tpPerPage = 20;
+  const tpChunks: (typeof project.trackProfiles)[] = [];
+  for (let i = 0; i < allTp.length; i += tpPerPage) {
+    tpChunks.push(allTp.slice(i, i + tpPerPage));
+  }
+  if (tpChunks.length === 0) tpChunks.push([]);
+  const tp1 = tpChunks[0] || [];
+  const tp2 = tpChunks[1] || [];
 
-  // Table 4 subsets
+  // Table 4 subsets (pack 12-14 TSL rows per page)
   const allTsl = project.tslRoutes || [];
-  const halfTsl = Math.ceil(allTsl.length / 2);
-  const tsl1 = allTsl.slice(0, halfTsl);
-  const tsl2 = allTsl.slice(halfTsl);
+  const tslPerPage = 14;
+  const tslChunks: (typeof project.tslRoutes)[] = [];
+  for (let i = 0; i < allTsl.length; i += tslPerPage) {
+    tslChunks.push(allTsl.slice(i, i + tslPerPage));
+  }
+  if (tslChunks.length === 0) tslChunks.push([]);
+  const tsl1 = tslChunks[0] || [];
+  const tsl2 = tslChunks[1] || [];
 
   // ---------------------------------------------------------------------------
   // Build Page HTML according to selectedSection
@@ -793,7 +833,7 @@ export function exportTocToPdf(
           </tbody>
         </table>
 
-        ${isLastPart && (project.blockSections?.length || 0) > 0 ? `
+        ${isLastPart && selectedSection === 'all' && (project.blockSections?.length || 0) > 0 ? `
           <div class="section-title" style="margin-top: 10px;">BLOCK SECTION DETAILS (Annexure-I Amdt-6)</div>
           <table class="data-table" style="margin-top: 2px;">
             <thead>
@@ -1056,7 +1096,10 @@ export function exportTocToPdf(
   switch (selectedSection) {
     case 'track_profile': {
       docTitle = `${stationName} (${stationCode}) - Table 2 Track Profile`;
-      pagesHtml = renderTable2Sheet(tp1, 1, 2, 0) + renderTable2Sheet(tp2, 2, 2, halfTp);
+      const totalPages = tpChunks.length;
+      pagesHtml = tpChunks.map((chunk, idx) =>
+        renderTable2Sheet(chunk, idx + 1, totalPages, idx * tpPerPage)
+      ).join('');
       break;
     }
 
@@ -1272,7 +1315,8 @@ export function exportTocToPdf(
 
     case 'all': {
       docTitle = `${stationName} (${stationCode}) - KAVACH Table of Control (Full Booklet)`;
-      const totalPages = 12;
+      const t1PageCount = t1Chunks.length;
+      const totalPages = 2 + t1PageCount + 2 + 3;
       pagesHtml = `
         <!-- PAGE 1: Station Config Data Testing & General Information -->
         <div class="sheet-page">
@@ -1396,11 +1440,11 @@ export function exportTocToPdf(
           ${renderFooter('HANDOVER', 2, totalPages)}
         </div>
 
-        <!-- PAGES 3 to 7: Table 1 Parts 1 to 5 -->
+        <!-- Table 1 Parts (Dynamically Paged) -->
         ${t1Chunks.map((chunk, idx) => renderTable1Sheet(chunk, idx + 3, totalPages, idx === t1Chunks.length - 1)).join('')}
 
-        <!-- PAGE 8 & 9: Table 2 & 3 -->
-        ${renderTable2Sheet(tp1, 8, totalPages, 0)}
+        <!-- Table 2 Part 1 -->
+        ${renderTable2Sheet(tp1, 3 + t1PageCount, totalPages, 0)}
 
         <div class="sheet-page">
           <div>
@@ -1434,7 +1478,7 @@ export function exportTocToPdf(
               <tbody>
                 ${tp2.map((tp, idx) => `
                   <tr>
-                    <td class="text-center mono bold">${tp.slNo || idx + halfTp + 1}</td>
+                    <td class="text-center mono bold">${tp.slNo || idx + tp1.length + 1}</td>
                     <td class="mono bold text-center">${tp.entrySignal}</td>
                     <td class="mono bold text-center">${tp.exitSignal}</td>
                     <td>${tp.line}</td>
@@ -1486,10 +1530,10 @@ export function exportTocToPdf(
               </tbody>
             </table>
           </div>
-          ${renderFooter('TP', 9, totalPages)}
+          ${renderFooter('TP', 4 + t1PageCount, totalPages)}
         </div>
 
-        <!-- PAGES 10 to 12: Table 4 -->
+        <!-- Table 4 Parts -->
         <div class="sheet-page">
           <div>
             ${renderHeader('TEMPORARY SINGLE LINE (TSL) WORKING - SELECTION TABLE', 'TSL')}
@@ -1537,7 +1581,7 @@ export function exportTocToPdf(
               </tbody>
             </table>
           </div>
-          ${renderFooter('TSL', 10, totalPages)}
+          ${renderFooter('TSL', 5 + t1PageCount, totalPages)}
         </div>
 
         <div class="sheet-page">
@@ -1617,7 +1661,7 @@ export function exportTocToPdf(
               </tbody>
             </table>
           </div>
-          ${renderFooter('TSL', 11, totalPages)}
+          ${renderFooter('TSL', 6 + t1PageCount, totalPages)}
         </div>
 
         <div class="sheet-page">
@@ -1672,7 +1716,7 @@ export function exportTocToPdf(
               </tbody>
             </table>
           </div>
-          ${renderFooter('TSL_TP', 12, totalPages)}
+          ${renderFooter('TSL_TP', 7 + t1PageCount, totalPages)}
         </div>
       `;
       break;
@@ -1713,8 +1757,8 @@ export function exportTocToPdf(
     .sheet-page {
       width: 404mm;
       min-height: 275mm;
-      max-height: 275mm;
       page-break-after: always;
+      page-break-inside: avoid;
       box-sizing: border-box;
       display: flex;
       flex-direction: column;
@@ -1723,10 +1767,24 @@ export function exportTocToPdf(
       padding: 6px;
       margin-bottom: 20px;
       background: #fff;
-      overflow: hidden;
     }
     .sheet-page:last-child {
       page-break-after: auto;
+    }
+    @media print {
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      .sheet-page {
+        margin-bottom: 0 !important;
+        border: 2px solid #000;
+        page-break-after: always;
+        page-break-inside: avoid;
+      }
+      .sheet-page:last-child {
+        page-break-after: auto;
+      }
     }
     .header-table, .data-table, .meta-table, .approval-table {
       width: 100%;
@@ -1739,6 +1797,8 @@ export function exportTocToPdf(
     }
     .data-table th, .data-table td, .meta-table th, .meta-table td, .approval-table td {
       border: 1px solid #000;
+      padding: 2px 3.5px;
+    }
       padding: 2.5px 3.5px;
     }
     .data-table th, .meta-table th {

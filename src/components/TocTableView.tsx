@@ -179,15 +179,6 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
             <Printer className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Print PDF</span>
           </button>
-          <div className="h-4 w-px bg-slate-300 mx-1" aria-hidden="true" />
-          <button
-            type="button"
-            onClick={() => exportTocToPdf(project, 'all')}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded cursor-pointer whitespace-nowrap"
-            title="Print entire 12-page RDSO booklet including all tables"
-          >
-            <span>Print All Tables</span>
-          </button>
         </div>
       </div>
 
@@ -297,44 +288,48 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                         },
                       ];
 
-                  return perms.map((perm, pIdx) => (
-                    <tr
-                      key={`${r.slNo}-${pIdx}`}
-                      className={`align-top transition-colors ${
-                        isHighlighted
-                          ? 'bg-blue-50/80'
-                          : r.engineerStatus === 'NEEDS_REVIEW'
-                            ? 'bg-amber-50/30 hover:bg-amber-50/60'
-                            : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <td className="py-2 px-2.5 border-r border-slate-200 font-mono tabular-nums font-semibold text-slate-900">
-                        {pIdx === 0 ? r.slNo : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 font-mono font-semibold text-slate-900 whitespace-nowrap">
-                        {pIdx === 0 ? r.entrySignal : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 font-mono font-semibold text-slate-900 whitespace-nowrap">
-                        {pIdx === 0 ? r.exitSignal : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 text-slate-800 whitespace-nowrap">
-                        {pIdx === 0 ? r.leadingToLine : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 font-mono text-center">
-                        {pIdx === 0 ? (r.tsrmsRouteId || String(r.slNo)) : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 text-slate-700 whitespace-nowrap">
-                        {pIdx === 0 ? (r.sectionType || 'Station Section') : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 text-slate-700">
-                        {pIdx === 0 ? r.signalType : ''}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 font-medium text-slate-900">
-                        {perm.aspectOfEntrySignal}
-                      </td>
-                      <td className="py-2 px-2.5 border-r border-slate-200 text-slate-600">
-                        {perm.requiresAspectOfExitSignal}
-                      </td>
+                  let prevAspect = '';
+                  return perms.map((perm, pIdx) => {
+                    const showAspect = perm.aspectOfEntrySignal !== prevAspect;
+                    prevAspect = perm.aspectOfEntrySignal;
+                    return (
+                      <tr
+                        key={`${r.slNo}-${pIdx}`}
+                        className={`align-top transition-colors ${
+                          isHighlighted
+                            ? 'bg-blue-50/80'
+                            : r.engineerStatus === 'NEEDS_REVIEW'
+                              ? 'bg-amber-50/30 hover:bg-amber-50/60'
+                              : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <td className="py-2 px-2.5 border-r border-slate-200 font-mono tabular-nums font-semibold text-slate-900">
+                          {pIdx === 0 ? r.slNo : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 font-mono font-semibold text-slate-900 whitespace-nowrap">
+                          {pIdx === 0 ? r.entrySignal : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 font-mono font-semibold text-slate-900 whitespace-nowrap">
+                          {pIdx === 0 ? r.exitSignal : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 text-slate-800 whitespace-nowrap">
+                          {pIdx === 0 ? r.leadingToLine : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 font-mono text-center">
+                          {pIdx === 0 ? (r.tsrmsRouteId || String(r.slNo)) : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 text-slate-700 whitespace-nowrap">
+                          {pIdx === 0 ? (r.sectionType || 'Station Section') : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 text-slate-700">
+                          {pIdx === 0 ? r.signalType : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 font-medium text-slate-900">
+                          {showAspect ? perm.aspectOfEntrySignal : ''}
+                        </td>
+                        <td className="py-2 px-2.5 border-r border-slate-200 text-slate-600">
+                          {perm.requiresAspectOfExitSignal}
+                        </td>
                       <td className="py-2 px-2.5 border-r border-slate-200 font-mono text-center font-semibold text-slate-800">
                         {pIdx === 0 ? (r.requiredRouteLocking || '-') : ''}
                       </td>
@@ -426,8 +421,9 @@ export const TocTableView: React.FC<TocTableViewProps> = ({
                         )}
                       </td>
                     </tr>
-                  ));
-                })}
+                  );
+                });
+              })}
               </tbody>
             </table>
           </div>
