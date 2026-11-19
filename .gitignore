@@ -18,7 +18,9 @@ dist-ssr
 
 # Wrangler / Cloudflare
 .wrangler/
+.lovable/
 .dev.vars
+scripts/test_*.mjs
 
 # Editor directories and files
 .vscode/*

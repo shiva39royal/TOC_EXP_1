@@ -1,4 +1,5 @@
 <!-- LOVABLE:BEGIN -->
+
 > [!IMPORTANT]
 > This project is connected to [Lovable](https://lovable.dev). Avoid rewriting
 > published git history — force pushing, or rebasing/amending/squashing commits
@@ -27,9 +28,11 @@ use the editor.
   `LOVABLE_API_KEY`. When Lovable does not provide one, users can bring their
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
+
 <!-- LOVABLE:END -->
 
 ## SignalTOC architecture
+
 - The workbench UI (`src/components/SignalTocApp.tsx`) renders client-only from `/` because pdfjs, OCR, and the DWG decoder are browser-only libraries. Projects persist locally in IndexedDB.
 - Offline extraction is the default and never leaves the browser: `src/utils/offlineOcr.ts` renders the drawing at ~9000px long side, reads overlapping tiles (as drawn, cleaned of long lines, and rotated for vertical labels) with bundled Tesseract workers, and detects running-line bands and signal-head circles (`src/engine/drawingSymbols.ts`); `src/engine/offlineExtractor.ts` links tokens using distances measured in label-text heights so it works at any drawing scale.
 - DWG/DXF decoding runs in the browser (`src/utils/cadParser.ts`, WASM served from `public/libredwg/`). Its positioned annotations feed the same offline extractor.
