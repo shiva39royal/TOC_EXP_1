@@ -372,15 +372,20 @@ export function extractDxfExtentsAndTexts(
           const p = applyMatrix(mat, pt.x, pt.y);
           expandPt(p.x, p.y, effectiveLayer);
         }
-      } else if (ent.type === "TEXT" || ent.type === "MTEXT") {
-        const t = ent as ITextEntity & IMtextEntity;
+      } else if (
+        ent.type === "TEXT" ||
+        ent.type === "MTEXT" ||
+        ent.type === "ATTDEF" ||
+        ent.type === "ATTRIB"
+      ) {
+        const t = ent as any;
         const pos = t.position ?? t.startPoint;
         if (pos) {
           const p = applyMatrix(mat, pos.x, pos.y);
           expandPt(p.x, p.y, effectiveLayer);
-          const cleaned = t.text ? cleanCadMtext(t.text) : "";
-          if (cleaned) {
-            texts.push({ text: cleaned, x: p.x, y: p.y, layer: effectiveLayer });
+          const raw = t.text ? cleanCadMtext(t.text) : (t.value ? cleanCadMtext(t.value) : "");
+          if (raw) {
+            texts.push({ text: raw, x: p.x, y: p.y, layer: effectiveLayer });
           }
         }
       } else if (ent.type === "DIMENSION") {
@@ -470,7 +475,7 @@ export function renderDxfToCanvas(opts: DxfRenderOptions): void {
   const query = searchQuery?.trim().toLowerCase() ?? "";
 
   ctx.save();
-  ctx.fillStyle = darkTheme ? "#0b1120" : "#ffffff";
+  ctx.fillStyle = darkTheme ? "#000000" : "#ffffff";
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
   // Subtle CAD coordinate grid
@@ -566,18 +571,51 @@ export function renderDxfToCanvas(opts: DxfRenderOptions): void {
 
       if (ent.type === "INSERT") {
         const ins = ent as IInsertEntity & {
-          attribs?: Array<{ text?: string; position?: IPoint; startPoint?: IPoint }>;
+          attribs?: Array<{
+            text?: string;
+            position?: IPoint;
+            startPoint?: IPoint;
+            endPoint?: IPoint;
+            tag?: string;
+            invisible?: boolean;
+            horizontalJustification?: number;
+            verticalJustification?: number;
+          }>;
         };
         if (Array.isArray(ins.attribs)) {
           for (const attr of ins.attribs) {
-            const rawAttr = attr.text ? cleanCadMtext(attr.text) : "";
-            const pt = attr.position ?? attr.startPoint ?? ins.position;
+            if (attr.invisible) continue;
+            const rawAttr = attr.text
+              ? cleanCadMtext(attr.text)
+              : (attr as any).value
+                ? cleanCadMtext((attr as any).value)
+                : "";
+            // Suppress unpopulated block prototype attribute templates
+            if (!rawAttr || /^(?:S-S\.|R-|P-|PA|PB|0|\(CSR-\s*m\))$/i.test(rawAttr.trim())) continue;
+            const hasJust = Boolean(attr.horizontalJustification || attr.verticalJustification);
+            const pt = hasJust ? (attr.endPoint ?? attr.position ?? attr.startPoint) : (attr.position ?? attr.startPoint ?? ins.position);
             if (rawAttr && pt) {
               const tp = applyMatrix(mat, pt.x, pt.y);
+              const matRot = Math.atan2(mat.b, mat.a);
+              let effRot = -matRot;
+              while (effRot > Math.PI) effRot -= 2 * Math.PI;
+              while (effRot < -Math.PI) effRot += 2 * Math.PI;
+              if (effRot > Math.PI / 2 || effRot < -Math.PI / 2) {
+                effRot += Math.PI;
+              }
               ctx.save();
+              ctx.translate(worldToScreenX(tp.x), worldToScreenY(tp.y));
+              ctx.rotate(effRot);
               ctx.fillStyle = color;
-              ctx.font = '500 10px "JetBrains Mono", monospace';
-              ctx.fillText(rawAttr, worldToScreenX(tp.x), worldToScreenY(tp.y));
+              ctx.font = '600 11px "JetBrains Mono", monospace';
+              if (attr.horizontalJustification === 1) ctx.textAlign = "center";
+              else if (attr.horizontalJustification === 2) ctx.textAlign = "right";
+              else ctx.textAlign = "left";
+              if (attr.verticalJustification === 2) ctx.textBaseline = "middle";
+              else if (attr.verticalJustification === 3) ctx.textBaseline = "top";
+              else if (attr.verticalJustification === 1) ctx.textBaseline = "bottom";
+              else ctx.textBaseline = "alphabetic";
+              ctx.fillText(rawAttr, 0, 0);
               ctx.restore();
             }
           }
@@ -736,11 +774,22 @@ export function renderDxfToCanvas(opts: DxfRenderOptions): void {
           ctx.lineTo(sx, sy + 4);
           ctx.stroke();
         }
-      } else if (ent.type === "TEXT" || ent.type === "MTEXT") {
-        const t = ent as ITextEntity & IMtextEntity;
-        const raw = t.text ? cleanCadMtext(t.text) : "";
-        if (!raw) continue;
-        const anchor = t.position ?? t.startPoint;
+      } else if (
+        ent.type === "TEXT" ||
+        ent.type === "MTEXT" ||
+        ent.type === "ATTRIB"
+      ) {
+        const t = ent as any;
+        if (t.invisible === true) continue;
+        const raw = t.text
+          ? cleanCadMtext(t.text)
+          : t.value
+            ? cleanCadMtext(t.value)
+            : "";
+        if (!raw || /^(?:S-S\.|R-|P-|PA|PB|0|\(CSR-\s*m\)|\(-N\)|AT Occupied|ROUTES?|TIN_NO|TRACK_NO)$/i.test(raw.trim())) continue;
+
+        const hasJust = Boolean(t.horizontalJustification || t.verticalJustification);
+        const anchor = hasJust ? (t.endPoint ?? t.position ?? t.startPoint) : (t.position ?? t.startPoint);
         if (!anchor) continue;
 
         const tp = applyMatrix(mat, anchor.x, anchor.y);
@@ -750,7 +799,8 @@ export function renderDxfToCanvas(opts: DxfRenderOptions): void {
         const worldScale = Math.hypot(mat.a, mat.b);
         const pxHeight = rawHeight * worldScale * pixelsPerWorldUnit;
 
-        if (pxHeight < 1.8 && !query) continue;
+        // Keep labels legible: if font is small, clamp to at least 7px when user is zoomed in
+        if (pxHeight < 0.7 && !query) continue;
 
         const matRot = Math.atan2(mat.b, mat.a);
         let entityRot = 0;
@@ -761,13 +811,42 @@ export function renderDxfToCanvas(opts: DxfRenderOptions): void {
         }
 
         const isMatch = query.length > 0 && raw.toLowerCase().includes(query);
-        const fontPx = Math.max(6.5, Math.min(48, pxHeight || 10));
+        const fontPx = Math.max(7.0, Math.min(48, pxHeight || 10));
+
+        const det = mat.a * mat.d - mat.b * mat.c;
+        const signY = det < 0 ? -1 : 1;
+        let effRot = -(matRot + signY * entityRot);
+        while (effRot > Math.PI) effRot -= 2 * Math.PI;
+        while (effRot < -Math.PI) effRot += 2 * Math.PI;
+        // AutoCAD standard text reading: keep text reading from left-to-right (never upside down)
+        if (effRot > Math.PI / 2) {
+          effRot -= Math.PI;
+        } else if (effRot < -Math.PI / 2) {
+          effRot += Math.PI;
+        }
 
         ctx.save();
         ctx.translate(sx, sy);
-        ctx.rotate(-(matRot + entityRot));
-        ctx.font = `${isMatch ? "700" : "500"} ${fontPx.toFixed(1)}px "JetBrains Mono", monospace`;
-        ctx.textBaseline = ent.type === "MTEXT" ? "top" : "alphabetic";
+        ctx.rotate(effRot);
+        ctx.font = `${isMatch ? "700" : "600"} ${fontPx.toFixed(1)}px "JetBrains Mono", monospace`;
+
+        if (t.horizontalJustification === 1) {
+          ctx.textAlign = "center";
+        } else if (t.horizontalJustification === 2) {
+          ctx.textAlign = "right";
+        } else {
+          ctx.textAlign = "left";
+        }
+
+        if (t.verticalJustification === 2) {
+          ctx.textBaseline = "middle";
+        } else if (t.verticalJustification === 3) {
+          ctx.textBaseline = "top";
+        } else if (t.verticalJustification === 1) {
+          ctx.textBaseline = "bottom";
+        } else {
+          ctx.textBaseline = ent.type === "MTEXT" ? "top" : "alphabetic";
+        }
 
         const lines = raw.split("\n");
         if (isMatch) {

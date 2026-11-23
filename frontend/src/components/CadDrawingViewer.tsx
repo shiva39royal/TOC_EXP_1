@@ -20,7 +20,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type { SourceLayoutAsset } from "../types/signalling";
+import type { SourceLayoutAsset, StationProject } from "../types/signalling";
 import { detectPdfPageRotation } from "../utils/pdfImageExtractor";
 import {
   extractDxfExtentsAndTexts,
@@ -28,12 +28,15 @@ import {
   renderDxfToCanvas,
   type DxfLayerSummary,
 } from "../utils/dxfRenderer";
+import { CadViewer, type CadViewerHandle } from "../cad/CadViewer";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 interface CadDrawingViewerProps {
   sourceLayout?: SourceLayoutAsset;
   stationTitle: string;
+  project?: StationProject;
+  selectedRouteId?: number | null;
 }
 
 const ZOOM_PRESETS = [
@@ -59,15 +62,18 @@ const ZOOM_PRESETS = [
 export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
   sourceLayout,
   stationTitle,
+  project,
+  selectedRouteId,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cadViewerRef = useRef<CadViewerHandle | null>(null);
 
   const [canvasSize, setCanvasSize] = useState({ width: 960, height: 560 });
   const canvasSizeRef = useRef(canvasSize);
   canvasSizeRef.current = canvasSize;
 
-  const backgroundMode = "white" as const;
+  const [backgroundMode, setBackgroundMode] = useState<"dark" | "white">("dark");
   const [showCrosshair, setShowCrosshair] = useState(true);
   const [cursorCoords, setCursorCoords] = useState<{ x: number; y: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -271,6 +277,10 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
 
   // Zoom-to-Fit helper
   const fitToView = useCallback(() => {
+    if (sourceLayout?.cadRenderUrl && cadViewerRef.current) {
+      cadViewerRef.current.fit();
+      return;
+    }
     if (isPdfRef.current) {
       setPdfZoom(1);
       setPdfPan({ x: 0, y: 0 });
@@ -348,8 +358,294 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
       searchQuery,
     });
 
+    // Render Domain Signaling Assets (Signals, RFID Tags, Points & Route Illumination)
+    if (project) {
+      const toScreenX = (wx: number) => canvasSize.width / 2 + (wx - camera.cx) * camera.scale;
+      const toScreenY = (wy: number) => canvasSize.height / 2 - (wy - camera.cy) * camera.scale;
+      const isDark = backgroundMode === "dark";
+
+      // 1. Render Point Machines & Turnouts
+      for (const pt of project.points || []) {
+        if (pt.x === undefined || pt.y === undefined) continue;
+        const px = toScreenX(pt.x);
+        const py = toScreenY(pt.y);
+        if (px < -60 || px > canvasSize.width + 60 || py < -40 || py > canvasSize.height + 40) continue;
+
+        const label = String(pt.name || pt.id || "PT").toUpperCase();
+        ctx.save();
+        ctx.font = '700 9px "JetBrains Mono", monospace';
+        const txtW = ctx.measureText(label).width;
+        const boxW = Math.max(22, txtW + 8);
+        const boxH = 14;
+
+        ctx.fillStyle = "#f97316";
+        ctx.strokeStyle = isDark ? "#ffffff" : "#1e293b";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(px - boxW / 2, py - boxH / 2, boxW, boxH, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#000000";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, px, py);
+        ctx.restore();
+      }
+
+      // 2. Render RFID Tags (Authentic RDSO Sleeper Casing & Legend Glyph)
+      for (const tag of project.tags || []) {
+        if (tag.x === undefined || tag.y === undefined) continue;
+        const tx = toScreenX(tag.x);
+        const ty = toScreenY(tag.y);
+        if (tx < -80 || tx > canvasSize.width + 80 || ty < -40 || ty > canvasSize.height + 40) continue;
+
+        const tagText = String(tag.tagId || tag.id || "RFID");
+        let typeLetter = "N";
+        const rawType = String(tag.tagType || "").toUpperCase();
+        if (rawType.includes("FOOT") || rawType === "S") typeLetter = "S";
+        else if (rawType.includes("TURN") || rawType.includes("TIN") || rawType === "T") typeLetter = "T";
+        else if (rawType.includes("EXIT") || rawType === "X") typeLetter = "X";
+        else if (rawType.includes("GATE") || rawType === "G") typeLetter = "G";
+        else if (rawType.includes("ADJ") || rawType.includes("JUNC") || rawType === "A") typeLetter = "A";
+        else if (rawType.includes("LINE") || rawType === "L") typeLetter = "L";
+
+        ctx.save();
+        // Casing rectangle on sleeper/track line (magenta outline matching CAD)
+        const caseW = Math.max(16, Math.min(32, 18 * camera.scale));
+        const caseH = Math.max(8, Math.min(14, 8 * camera.scale));
+        ctx.strokeStyle = "#e879f9";
+        ctx.fillStyle = "rgba(232, 121, 249, 0.12)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.rect(tx - caseW / 2, ty - caseH / 2, caseW, caseH);
+        ctx.fill();
+        ctx.stroke();
+
+        // RDSO Legend glyph symbol (triangle / rectangle)
+        const symW = 12;
+        const symH = 10;
+        const symY = ty - caseH / 2 - 7;
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1;
+        ctx.fillStyle = isDark ? "rgba(0,0,0,0.75)" : "rgba(255,255,255,0.75)";
+        if (typeLetter === "T") {
+          ctx.beginPath();
+          ctx.rect(tx - symW / 2, symY - symH / 2, symW, symH);
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.moveTo(tx - symW / 2, symY - symH / 2);
+          ctx.lineTo(tx + symW / 2, symY);
+          ctx.lineTo(tx - symW / 2, symY + symH / 2);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#ffffff";
+        ctx.font = '700 7px "JetBrains Mono", sans-serif';
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(typeLetter, typeLetter === "T" ? tx : tx - 1, symY);
+
+        // Tag ID text below casing (clean, non-overlapping)
+        if (camera.scale >= 0.35) {
+          ctx.font = '600 9px "JetBrains Mono", monospace';
+          ctx.fillStyle = isDark ? "#f1f5f9" : "#1e293b";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "top";
+          ctx.fillText(tagText, tx, ty + caseH / 2 + 3);
+        }
+        ctx.restore();
+      }
+
+      // 3. Render Signal Heads & Aspect Badges (Matching Image 5)
+      for (const sig of project.signals || []) {
+        if (sig.x === undefined || sig.y === undefined) continue;
+        const sx = toScreenX(sig.x);
+        const sy = toScreenY(sig.y);
+        if (sx < -90 || sx > canvasSize.width + 90 || sy < -60 || sy > canvasSize.height + 60) continue;
+
+        const isNominal = sig.direction === "DOWN" || sig.direction === "Nominal";
+        const sigName = String(sig.name || "S").toUpperCase();
+
+        ctx.save();
+        ctx.font = '700 11px "JetBrains Mono", sans-serif';
+        const txtW = ctx.measureText(sigName).width;
+        const badgeW = Math.max(32, txtW + 12);
+        const badgeH = 16;
+
+        // Mast line connecting badge to track
+        ctx.strokeStyle = isDark ? "#94a3b8" : "#475569";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx, sy - 10);
+        ctx.stroke();
+
+        // Signal Badge Capsule: Dark slate background with green/cyan neon border
+        const badgeY = sy - 20;
+        ctx.fillStyle = isDark ? "#090d16" : "#0f172a";
+        ctx.strokeStyle = isNominal ? "#10b981" : "#06b6d4";
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.roundRect(sx - badgeW / 2, badgeY - badgeH / 2, badgeW, badgeH, 5);
+        ctx.fill();
+        ctx.stroke();
+
+        // Signal ID Text
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(sigName, sx, badgeY);
+
+        // Aspect Circles (Red, Amber, Green) underneath
+        const aspects = ["#ef4444", "#f59e0b", "#22c55e"];
+        const dotR = 2.2;
+        const dotSpacing = 6.5;
+        const startDotX = sx - ((aspects.length - 1) * dotSpacing) / 2;
+        const dotsY = badgeY + badgeH / 2 + 4;
+
+        for (let i = 0; i < aspects.length; i++) {
+          const dx = startDotX + i * dotSpacing;
+          ctx.fillStyle = aspects[i];
+          ctx.strokeStyle = "#000000";
+          ctx.lineWidth = 0.5;
+          ctx.beginPath();
+          ctx.arc(dx, dotsY, dotR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 4. Route Illumination Overlay (When a route is actively inspected)
+      if (selectedRouteId) {
+        const route = project.routes.find((r) => r.slNo === selectedRouteId);
+        if (route) {
+          const entrySig = project.signals.find((s) => s.name === route.entrySignal);
+          const exitSig = project.signals.find((s) => s.name === route.exitSignal);
+
+          if (
+            entrySig?.x !== undefined &&
+            entrySig?.y !== undefined &&
+            exitSig?.x !== undefined &&
+            exitSig?.y !== undefined
+          ) {
+            const enX = toScreenX(entrySig.x);
+            const enY = toScreenY(entrySig.y);
+            const exX = toScreenX(exitSig.x);
+            const exY = toScreenY(exitSig.y);
+
+            // Intermediate points along route
+            const pts: Array<[number, number]> = [[enX, enY]];
+            const ptNames = [
+              ...(route.pointsNormal ? route.pointsNormal.split(",").map((s) => s.trim().toUpperCase()) : []),
+              ...(route.pointsReverse ? route.pointsReverse.split(",").map((s) => s.trim().toUpperCase()) : []),
+            ].filter(Boolean);
+
+            for (const ptName of ptNames) {
+              const pItem = project.points.find((p) => p.name?.toUpperCase() === ptName || p.id?.toUpperCase() === ptName);
+              if (pItem?.x !== undefined && pItem?.y !== undefined) {
+                pts.push([toScreenX(pItem.x), toScreenY(pItem.y)]);
+              }
+            }
+            pts.push([exX, exY]);
+
+            // Sort intermediate points by distance from entry
+            pts.sort((a, b) => Math.hypot(a[0] - enX, a[1] - enY) - Math.hypot(b[0] - enX, b[1] - enY));
+
+            ctx.save();
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+
+            // Electric Cyan Neon Aura
+            ctx.shadowColor = "#00e5ff";
+            ctx.shadowBlur = 14;
+            ctx.strokeStyle = "rgba(0, 229, 255, 0.45)";
+            ctx.lineWidth = 9;
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+            ctx.stroke();
+
+            // Intense Electric Beam
+            ctx.shadowBlur = 4;
+            ctx.strokeStyle = "#00e5ff";
+            ctx.lineWidth = 3.5;
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+            ctx.stroke();
+
+            // Flow Dashed Line
+            ctx.shadowBlur = 0;
+            ctx.setLineDash([8, 6]);
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Intermediate RFID Beacons along Route
+            for (const tagItem of route.rfidSequence || []) {
+              const rTag = project.tags.find((t) => t.id === tagItem.tagId);
+              if (rTag?.x !== undefined && rTag?.y !== undefined) {
+                const rx = toScreenX(rTag.x);
+                const ry = toScreenY(rTag.y);
+                ctx.strokeStyle = "#ffd600";
+                ctx.fillStyle = "rgba(255, 214, 0, 0.35)";
+                ctx.lineWidth = 2;
+                ctx.shadowColor = "#ffd600";
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(rx, ry, 7, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+              }
+            }
+
+            // Entry Signal Proceed Badge (Green Glowing Beacon)
+            ctx.fillStyle = "#00e676";
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 2;
+            ctx.shadowColor = "#00e676";
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.arc(enX, enY - 18, 9, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "#00e676";
+            ctx.font = '700 11px sans-serif';
+            ctx.fillText(`ENTRY: ${route.entrySignal}`, enX + 14, enY - 14);
+
+            // Exit Signal Stop Badge (Red Glowing Beacon)
+            ctx.fillStyle = "#ff1744";
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 2;
+            ctx.shadowColor = "#ff1744";
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.arc(exX, exY - 18, 9, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "#ff1744";
+            ctx.font = '700 11px sans-serif';
+            ctx.fillText(`EXIT: ${route.exitSignal}`, exX + 14, exY - 14);
+
+            ctx.restore();
+          }
+        }
+      }
+    }
+
     ctx.restore();
-  }, [isPdf, dxfData, canvasSize, camera, visibleLayers, backgroundMode, searchQuery, cadRotation]);
+  }, [isPdf, dxfData, canvasSize, camera, visibleLayers, backgroundMode, searchQuery, cadRotation, project, selectedRouteId]);
 
   // Paint PDF viewport synchronously from cached high-res bitmap or settled native vector snapshot
   const paintPdfViewport = useCallback(() => {
@@ -638,11 +934,19 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
   }, [sourceLayout, dxfData, isPdf, zoomAtPoint]);
 
   const handleZoomIn = () => {
+    if (sourceLayout?.cadRenderUrl && cadViewerRef.current) {
+      cadViewerRef.current.zoomIn();
+      return;
+    }
     const size = canvasSizeRef.current;
     zoomAtPoint(1.3, size.width / 2, size.height / 2);
   };
 
   const handleZoomOut = () => {
+    if (sourceLayout?.cadRenderUrl && cadViewerRef.current) {
+      cadViewerRef.current.zoomOut();
+      return;
+    }
     const size = canvasSizeRef.current;
     zoomAtPoint(1 / 1.3, size.width / 2, size.height / 2);
   };
@@ -778,7 +1082,19 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
     }));
   };
 
-  const handleExportPng = () => {
+  const handleExportPng = async () => {
+    if (sourceLayout?.cadRenderUrl && cadViewerRef.current) {
+      const blob = await cadViewerRef.current.exportPng();
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.download = `${stationTitle.replace(/\s+/g, "_")}_Layout.png`;
+        link.href = url;
+        link.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+    }
     const canvas = canvasRef.current;
     if (!canvas) return;
     const link = document.createElement("a");
@@ -787,7 +1103,7 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
     link.click();
   };
 
-  if (!sourceLayout || (!dxfData && !isPdf)) {
+  if (!sourceLayout || (!dxfData && !isPdf && !sourceLayout.cadRenderUrl)) {
     return null;
   }
 
@@ -1003,6 +1319,19 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
               <Crosshair className="w-3.5 h-3.5" />
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => setBackgroundMode((m) => (m === "dark" ? "white" : "dark"))}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 border rounded font-medium cursor-pointer whitespace-nowrap shadow-xs ${
+              backgroundMode === "dark"
+                ? "bg-slate-900 border-slate-700 text-amber-300 hover:bg-slate-800"
+                : "bg-white border-slate-300 text-slate-800 hover:bg-slate-100"
+            }`}
+            title="Toggle CAD Background (AutoCAD Dark / White)"
+          >
+            <span>{backgroundMode === "dark" ? "CAD Black" : "CAD White"}</span>
+          </button>
           <button
             type="button"
             onClick={handleExportPng}
@@ -1082,15 +1411,28 @@ export const CadDrawingViewer: React.FC<CadDrawingViewerProps> = ({
 
         <div
           ref={containerRef}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleContainerMouseMove}
-          onDoubleClick={handleDoubleClick}
+          onMouseDown={sourceLayout?.cadRenderUrl ? undefined : handleMouseDown}
+          onMouseMove={sourceLayout?.cadRenderUrl ? undefined : handleContainerMouseMove}
+          onDoubleClick={sourceLayout?.cadRenderUrl ? undefined : handleDoubleClick}
           onMouseLeave={() => setCursorCoords(null)}
           className={`relative flex-1 overflow-hidden select-none touch-none ${
-            backgroundMode === "dark" ? "bg-slate-950" : "bg-white"
-          } ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+            backgroundMode === "dark" ? "bg-black" : "bg-white"
+          } ${isDragging ? "cursor-grabbing" : ""}`}
         >
-          <canvas ref={canvasRef} className="w-full h-full block" />
+          {sourceLayout?.cadRenderUrl ? (
+            <CadViewer
+              ref={cadViewerRef}
+              renderUrl={sourceLayout.cadRenderUrl}
+              components={sourceLayout.cadComponents}
+              kavachData={sourceLayout.kavachData}
+              selectedRouteIndex={selectedRouteId}
+              backgroundMode={backgroundMode}
+              showGrid={false}
+              showLineweights={true}
+            />
+          ) : (
+            <canvas ref={canvasRef} className="w-full h-full block" />
+          )}
 
           {isPdf && isPdfRendering && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-900/10">

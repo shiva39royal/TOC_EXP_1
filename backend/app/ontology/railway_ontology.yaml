@@ -1,0 +1,256 @@
+version: "1.0.0"
+description: "Authoritative declarative railway domain ontology for AutoCAD entity classification."
+
+categories:
+  - id: 5
+    key: "shunts"
+    name: "Shunts"
+    icon: "shunt"
+    description: "Shunt signals and indicators (01HS, 60S, quadrant fan symbols)"
+    color: "#FFA500"
+    priority: 10
+    rules:
+      attribute_tags:
+        - "SHUNT_NO"
+        - "SHUNT_NO."
+        - "SH_NO"
+        - "SH_NO."
+        - "SHUNT"
+        - "SH_NAME"
+        - "SH_NUM"
+      name_keywords:
+        - "shunt"
+      layer_keywords:
+        - "shunt"
+      text_patterns:
+        - "^SH[-_ ]?\\d+[A-Z]?$"
+        - "^\\d{2}HS$"
+        - "^\\d{2,3}S$"
+
+  - id: 4
+    key: "axle_counters"
+    name: "Axle Counters"
+    icon: "circle"
+    description: "Detection points (DP7B, DP2A, etc.), wheel sensor double-circles, BPAC evaluators"
+    color: "#00FFFF"
+    priority: 20
+    rules:
+      attribute_tags:
+        - "DP_NO"
+        - "AXLE_NO"
+        - "RESET_NO"
+        - "BPAC_RIGHT"
+        - "BPAC_LEFT"
+        - "LSS_RIGHT"
+      name_keywords:
+        - "axle"
+        - "dp"
+        - "bpac"
+        - "counter"
+        - "evaluator"
+        - "dedt point"
+        - "dest point"
+        - "sest point"
+      layer_keywords:
+        - "axle"
+        - "dp"
+        - "detection"
+      text_patterns:
+        - "^DP\\d{1,2}[A-Z]?$"
+
+  - id: 3
+    key: "rfid_tags"
+    name: "RFID Tags"
+    icon: "tag"
+    description: "Track-mounted RFID tags (R-100 series), direction arrows, location markers"
+    color: "#FF00FF"
+    priority: 30
+    rules:
+      attribute_tags:
+        - "RFID_TAG_NO"
+        - "RFID_TAG_NO."
+        - "RFID_NO"
+        - "TAG_NO"
+      name_keywords:
+        - "rfid"
+        - "transponder"
+      layer_keywords:
+        - "rfid"
+        - "rfid tags"
+      text_patterns:
+        - "^R-\\d{2,4}$"
+        - "^Km:\\s*\\d+.*"
+        - "^\\d{1,3}\\.\\d{2,3}$"
+      direction_values:
+        - "N"
+        - "S"
+        - "G"
+        - "T"
+        - "L"
+        - "A"
+        - "X"
+        - "D"
+
+  - id: 6
+    key: "points"
+    name: "Points & Turnouts"
+    icon: "point"
+    description: "Point machines and switch crossovers (P12A, P12B)"
+    color: "#FF8000"
+    priority: 40
+    rules:
+      attribute_tags:
+        - "POINT_NO"
+        - "PT_NO"
+        - "SWITCH_NO"
+        - "A_END_POINT_NO"
+        - "A_END_POINT_NO."
+        - "B_END_POINT_NO"
+        - "B_END_POINT_NO."
+      name_keywords:
+        - "point"
+        - "turnout"
+        - "switch"
+        - "crossover"
+        - "point machine"
+        - "trap point"
+      layer_keywords:
+        - "point"
+        - "points"
+        - "switch"
+      text_patterns:
+        - "^P\\d{1,2}[A-Z]$"
+        - "^\\(?\\d{1,2}[A-Z]?\\)?$"
+
+  - id: 7
+    key: "gates"
+    name: "Level Crossing Gates"
+    icon: "gate"
+    description: "Interlocked LC gates, barriers, and closures"
+    color: "#FF0000"
+    priority: 50
+    rules:
+      attribute_tags:
+        - "LC_NO"
+        - "GATE_NO"
+        - "BARRIER_NO"
+      name_keywords:
+        - "gate"
+        - "barrier"
+        - "level crossing"
+        - "lc"
+      layer_keywords:
+        - "gate"
+        - "lc"
+        - "lc gates"
+      text_patterns:
+        - ".*lc\\.?\\s*no.*"
+        - "^LC\\s*\\d+.*"
+
+  - id: 1
+    key: "signals"
+    name: "Signals"
+    icon: "signal"
+    description: "Running signals, shunt signals, fog signals, distant, home, starter, auto, calling-on, and boards"
+    color: "#00FF00"
+    priority: 60
+    rules:
+      attribute_tags:
+        - "BOARD_NAME"
+        - "BOARD_TYPE"
+        - "BSLB"
+        - "SB"
+        - "SIGNAL_NO"
+        - "SIG_NO"
+        - "SIGNAL"
+        - "ASPECT"
+        - "ASPECTS"
+        - "SIGNAL_NAME"
+        - "ROUTES"
+        - "FM_NO"
+        - "FM_NO."
+      name_keywords:
+        - "signal"
+        - "distant"
+        - "starter"
+        - "home"
+        - "auto inner"
+        - "advance starter"
+        - "route indicator"
+        - "calling"
+        - "calling-on"
+        - "board bslb"
+        - "board stop"
+        - "board 101"
+        - "fog marker"
+        - "fog"
+        - "bslb"
+        - "stop board"
+      layer_keywords:
+        - "sig"
+        - "signal"
+        - "nom. sig"
+        - "rev. sig"
+      text_patterns:
+        - "^[SC]\\d{2,4}$"
+        - "^[A-Z]\\d{2,3}[A-Z]?$"
+
+  - id: 2
+    key: "tracks_tins"
+    name: "TINs & Track Circuits"
+    icon: "track"
+    description: "Track circuits (08T, C01T), turning TINs, crossovers (RFID-N/G), turnouts"
+    color: "#FFFF00"
+    priority: 70
+    rules:
+      attribute_tags:
+        - "TRACK_NO"
+        - "TIN_NO"
+        - "BERTH_NO"
+      name_keywords:
+        - "track"
+        - "tin"
+        - "rail"
+        - "berth"
+        - "crossover"
+        - "turnout"
+      layer_keywords:
+        - "track"
+        - "tin"
+        - "tin color"
+        - "tracks"
+      text_patterns:
+        - "^\\d{2,3}[A-Z]*T$"
+        - "^[A-Z]\\d{2,3}T$"
+        - "^\\d{2}/\\d{2}T$"
+        - "^\\(N-\\d+\\)$"
+        - "^N-\\d+$"
+        - "^MAIN LINE.*"
+        - "^LOOP LINE.*"
+
+  - id: 8
+    key: "templates"
+    name: "Station & Borders"
+    icon: "building"
+    description: "Station building, titles, scale bars, dimensions, and drawing template borders"
+    color: "#808080"
+    priority: 80
+    rules:
+      attribute_tags:
+        - "STATION"
+        - "TITLE"
+        - "DRAWING_NO"
+      name_keywords:
+        - "template"
+        - "border"
+        - "title"
+        - "station"
+        - "logo"
+      layer_keywords:
+        - "template"
+        - "border"
+        - "title"
+        - "defpoints"
+      text_patterns:
+        - ".*STATION\\s*BUILDING.*"
+        - ".*AESPL.*"

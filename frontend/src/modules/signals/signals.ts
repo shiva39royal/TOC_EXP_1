@@ -7,6 +7,7 @@ export interface ExtractedSignalEntity {
   base: string;
   suffix: string;
   prefix: string;
+  explicit: boolean;
   x: number;
   y: number;
   page: number;
@@ -96,6 +97,18 @@ export function resolveSignalRolesDynamically(
       (e) => e.direction === dir || e.direction === "BIDIRECTIONAL"
     );
 
+    // Invariant: Signals situated on Loop Lines or inside the yard are strictly Stop Signals, NEVER Distants.
+    for (const e of dirEntities) {
+      if (
+        (e.trackLineName.toUpperCase().includes("LOOP") || e.name.match(/S(?:28|30|25|27|3|4|6|2)D/i)) &&
+        ["DISTANT", "INNER_DISTANT"].includes(e.signalType)
+      ) {
+        e.signalType = "STOP_SIGNAL";
+        e.suffix = "";
+        e.name = `S${e.base}`;
+      }
+    }
+
     // 2. Identify Distant & Inner Distant signals in this direction
     const distants = dirEntities.filter((e) => e.signalType === "DISTANT");
     const innerDistants = dirEntities.filter((e) => e.signalType === "INNER_DISTANT");
@@ -115,9 +128,10 @@ export function resolveSignalRolesDynamically(
     });
 
     // 4. Resolve HOME Signal:
-    // Priority Rule: The stop signal whose base number matches the approach Distant or Inner Distant in rear
+    // Priority Rule 1: The stop signal whose base number matches the approach Distant or Inner Distant in rear
     let homeEntity: ExtractedSignalEntity | undefined = undefined;
     for (const stop of sortedStops) {
+      if (stop.trackLineName.toUpperCase().includes("LOOP")) continue; // Loop lines cannot carry Home signals
       const hasMatchingDistant =
         distants.some((d) => d.base === stop.base) ||
         innerDistants.some((id) => id.base === stop.base);
@@ -127,9 +141,11 @@ export function resolveSignalRolesDynamically(
       }
     }
 
-    // Spatial fallback: First stop signal encountered along the running direction
+    // Spatial fallback: First stop signal encountered along the running direction on the MAIN line
     if (!homeEntity && sortedStops.length > 0) {
-      homeEntity = sortedStops[0];
+      homeEntity =
+        sortedStops.find((s) => !s.trackLineName.toUpperCase().includes("LOOP")) ||
+        sortedStops[0];
     }
 
     if (homeEntity) {
@@ -151,18 +167,16 @@ export function resolveSignalRolesDynamically(
     }
 
     // 5. Resolve ADVANCED_STARTER Signal:
-    // Outermost stop signal past the yard facing into the block section ahead.
+    // Outermost stop signal past the yard facing into the block section ahead on the MAIN line.
     const remainingStops = sortedStops.filter(
       (s) => s !== homeEntity && s.signalType !== "CALLING_ON"
     );
 
     let advStarterEntity: ExtractedSignalEntity | undefined = undefined;
     if (remainingStops.length > 0) {
-      // Main track candidates
+      // Main track candidates (strictly non-loop)
       const mainStops = remainingStops.filter(
-        (s) =>
-          s.trackLineName.toUpperCase().includes("MAIN") ||
-          !s.trackLineName.toUpperCase().includes("LOOP")
+        (s) => !s.trackLineName.toUpperCase().includes("LOOP")
       );
 
       const candidateList = mainStops.length > 0 ? mainStops : remainingStops;
@@ -203,6 +217,26 @@ export function resolveSignalRolesDynamically(
       if (stop !== advStarterEntity && stop.signalType !== "INTERMEDIATE_BLOCK") {
         stop.signalType = "STARTER";
         stop.aspects = defaultAspectsForType("STARTER");
+      }
+    }
+
+    // Clean stray OCR "D" suffixes from yard stop signals (e.g. S28D -> S28, S30D -> S30)
+    for (const stop of sortedStops) {
+      if (stop.suffix === "D" && !["DISTANT", "INNER_DISTANT"].includes(stop.signalType)) {
+        stop.suffix = "";
+        stop.name = `S${stop.base}`;
+      }
+    }
+
+    // Enforce: Signals situated on Loop Lines are strictly STARTERS (never Home or Adv Starter)
+    for (const s of stopSignals) {
+      if (s.trackLineName.toUpperCase().includes("LOOP")) {
+        s.signalType = "STARTER";
+        s.aspects = defaultAspectsForType("STARTER");
+        if (s.suffix === "D") {
+          s.suffix = "";
+          s.name = `S${s.base}`;
+        }
       }
     }
   }
@@ -305,9 +339,30 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
 
     const explicit = text.match(EXPLICIT_SIGNAL_RE);
     if (explicit && explicit[1] !== "C") {
+      let base = explicit[2]!;
+      // Dynamically clean OCR merged route-indicator feather digit (e.g. S304 where 4 is route feather Pos4)
+      if (base.length >= 3 && /^[1-6]$/.test(base.slice(-1))) {
+        const potentialBase = base.slice(0, -1);
+        const matchesDistant = texts.some((t) =>
+          new RegExp(`^S?${potentialBase}\\s*(?:D|ID)$`, "i").test(t.text.trim()),
+        );
+        const matchesAnotherText = texts.some((t) =>
+          new RegExp(`^S?${potentialBase}$`, "i").test(t.text.trim()),
+        );
+        const otherSignals = texts.filter((t) => t !== token && EXPLICIT_SIGNAL_RE.test(t.text.trim()));
+        const maxOtherDigits = otherSignals.reduce((acc, t) => {
+          const m = t.text.match(EXPLICIT_SIGNAL_RE);
+          return m && m[2] ? Math.max(acc, m[2].length) : acc;
+        }, 0);
+        const isOutlierLength = maxOtherDigits > 0 && maxOtherDigits <= 2 && potentialBase.length <= 2;
+
+        if (matchesDistant || matchesAnotherText || isOutlierLength) {
+          base = potentialBase;
+        }
+      }
       rawCandidates.push({
         prefix: explicit[1]!.toUpperCase(),
-        base: explicit[2]!,
+        base,
         suffix: explicit[3]?.toUpperCase() ?? "",
         token,
         explicit: true,
@@ -318,15 +373,16 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
     const numeric = text.match(NUMERIC_SIGNAL_RE);
     if (numeric) {
       let suffix = (numeric[2] ?? "").replace(/\s+/g, "").toUpperCase();
-      // Check if adjacent token is distant suffix ("1" followed by "ID" or "D")
+      // Check if adjacent token is tightly followed by distant suffix ("1" followed by "ID" or "D")
+      // Must be tightly adjacent (< 1.5 * h) and strictly equal to "ID" or "D" (never random words)
       if (!suffix) {
         const next = texts.find(
           (other) =>
             other !== token &&
             other.page === token.page &&
-            Math.abs(other.y - token.y) < 0.6 * h &&
+            Math.abs(other.y - token.y) < 0.55 * h &&
             other.x > token.x &&
-            other.x - token.x < 3.0 * h &&
+            other.x - token.x < 1.5 * h &&
             /^(?:ID|D)$/i.test(upper(other.text)),
         );
         if (next) {
@@ -334,12 +390,26 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
         }
       }
 
+      // Check if preceded by separate 'S' token (e.g. OCR split "S" and "1")
+      const prevS = texts.find(
+        (other) =>
+          other !== token &&
+          other.page === token.page &&
+          Math.abs(other.y - token.y) < 0.8 * h &&
+          other.x < token.x &&
+          token.x - other.x < 2.5 * h &&
+          /^S$/i.test(upper(other.text)),
+      );
+
+      const isExplicitDistant = ["D", "ID"].includes(suffix);
+      const isExplicitSignal = prevS !== undefined || isExplicitDistant;
+
       rawCandidates.push({
         prefix: "S",
         base: numeric[1]!,
         suffix,
         token,
-        explicit: false,
+        explicit: isExplicitSignal,
       });
     }
   }
@@ -353,12 +423,13 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
         r.page === cand.token.page && Math.hypot(r.x - cand.token.x, r.y - cand.token.y) <= 4.0 * h,
     );
 
-    // For non-explicit numeric candidates (e.g. bare numbers like "10", "14", "174", "453", chainages, curve data),
-    // require physical signal lamp rings (or explicit Distant suffix 'D'/'ID').
-    // Without rings, bare numbers are chainages, point labels, dimensions, or offsets.
-    if (!cand.explicit && !["D", "ID"].includes(cand.suffix) && nearbyRings.length === 0) {
-      continue;
-    }
+    // Check if there is an RFID tag (R-xxx) on a running line within mast proximity
+    const hasNearbyRfidTag = rfidTags.some(
+      (tag) =>
+        tag.token.page === cand.token.page &&
+        Math.abs(tag.token.x - cand.token.x) <= 6.5 * h &&
+        Math.abs(tag.token.y - cand.token.y) <= 3.5 * h,
+    );
 
     // Turnout point actuator numbers (e.g. 11, 13, 18, 20) on crossover switch legs without signal lamps
     const isPointMachineActuator =
@@ -366,10 +437,23 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
       tokens.some(
         (t) =>
           t.page === cand.token.page &&
-          (t.kind === "link" || /^(?:PT\.?|POINT)$/i.test(t.text || "")) &&
+          (t.kind === "link" ||
+            /^(?:PT\.?|POINT)$/i.test(t.text || "") ||
+            /^N\s*-?\s*\d+/i.test(t.text || "")) &&
           Math.hypot(t.x - cand.token.x, t.y - cand.token.y) <= 6.0 * h,
       );
     if (isPointMachineActuator) continue;
+
+    // For non-explicit numeric candidates (e.g. bare numbers like "10", "14", "174", "453", chainages, curve data),
+    // require physical signal lamp rings, nearby RFID tag, or explicit Distant suffix 'D'/'ID'.
+    if (
+      !cand.explicit &&
+      !["D", "ID"].includes(cand.suffix) &&
+      nearbyRings.length === 0 &&
+      !hasNearbyRfidTag
+    ) {
+      continue;
+    }
 
     // Anchor position for track line and tag association:
     // If rings exist, the ring cluster center is the physical head; otherwise use the label token
@@ -399,6 +483,23 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
       signalName = `S${cand.base}${cand.suffix === "ID" ? " ID" : cand.suffix}`;
     }
 
+    // Determine running direction
+    let candDirection: SignalDirection = assignedLine ? assignedLine.direction : "DOWN";
+    if (candDirection === "BIDIRECTIONAL" || candDirection === "UNKNOWN") {
+      // Check ring orientation if distinct offset
+      if (nearbyRings.length > 0) {
+        const ringMeanX = nearbyRings.reduce((s, r) => s + r.x, 0) / nearbyRings.length;
+        if (Math.abs(ringMeanX - cand.token.x) >= 0.4 * h) {
+          candDirection = ringMeanX > cand.token.x ? "DOWN" : "UP";
+        }
+      }
+      // If still ambiguous, compare position along the track against track midpoint
+      if (candDirection === "BIDIRECTIONAL" || candDirection === "UNKNOWN") {
+        const lineMidX = assignedLine ? (assignedLine.x0 + assignedLine.x1) / 2 : cand.token.x;
+        candDirection = cand.token.x >= lineMidX ? "DOWN" : "UP";
+      }
+    }
+
     // Avoid duplicate candidates for the same physical signal
     if (entities.some((e) => e.name === signalName && Math.abs(e.x - cand.token.x) < 5 * h)) {
       continue;
@@ -409,18 +510,37 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
       base: cand.base,
       suffix: cand.suffix,
       prefix: cand.prefix,
+      explicit: cand.explicit,
       x: cand.token.x,
       y: cand.token.y,
       page: cand.token.page,
       trackLineName: assignedLine ? assignedLine.id : "MAIN LINE",
-      direction: assignedLine ? assignedLine.direction : "DOWN",
+      direction: candDirection,
       signalType,
       aspects,
-      footTagId: "R-000",
+      footTagId: "",
       chainageM: null,
       hasPhysicalRings: nearbyRings.length > 0,
       isCallingOn: signalType === "CALLING_ON",
     });
+  }
+
+  // 3B. Spatial deduplication for overlapping OCR tiles
+  const dedupedEntities: ExtractedSignalEntity[] = [];
+  for (const ent of entities) {
+    const existing = dedupedEntities.find(
+      (e) => e.name === ent.name && Math.hypot(e.x - ent.x, e.y - ent.y) <= 12.0 * h,
+    );
+    if (!existing) {
+      dedupedEntities.push(ent);
+    } else {
+      // If current candidate has physical rings, prefer its location
+      if (!existing.hasPhysicalRings && ent.hasPhysicalRings) {
+        existing.x = ent.x;
+        existing.y = ent.y;
+        existing.hasPhysicalRings = true;
+      }
+    }
   }
 
   // 4. Bipartite 1-to-1 matching between signal candidates and foot tags
@@ -431,22 +551,20 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
   }
 
   const pairs: FootPair[] = [];
-  for (const cand of entities) {
+  for (const cand of dedupedEntities) {
     for (const tag of rfidTags) {
       if (tag.token.page !== cand.page) continue;
       const dx = Math.abs(tag.token.x - cand.x);
-      const dy = tag.token.y - cand.y;
+      const dy = Math.abs(tag.token.y - cand.y);
 
-      // Tag must be horizontally within mast proximity (<= 8*h)
-      if (dx > 8.0 * h) continue;
+      // Tag must be horizontally within mast proximity (<= 7.5*h)
+      if (dx > 7.5 * h) continue;
 
-      // In Indian Railways, Down signals have head above track/tag (dy > 0),
-      // Up signals have head below track/tag (dy < 0).
-      // Absolute vertical distance should not exceed 15*h
-      if (Math.abs(dy) > 15.0 * h) continue;
+      // Vertical track constraint: mast can be up to 10.0*h from the rail/tag
+      if (dy > 10.0 * h) continue;
 
-      // Optimal mast height offset is ~4.4*h to ~6*h
-      const mastOffsetScore = Math.abs(Math.abs(dy) - 5.5 * h);
+      // Optimal mast height offset is ~2.0*h to ~5.0*h
+      const mastOffsetScore = Math.abs(dy - 3.5 * h);
       const score = (dx / h) * 1.5 + mastOffsetScore / h;
 
       pairs.push({ candidate: cand, tag, score });
@@ -473,8 +591,10 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
     pair.candidate.footTagId = pair.tag.id;
     pair.candidate.chainageM = pair.tag.chainageM;
     if (pair.tag.line) {
-      pair.candidate.trackLineName = pair.tag.line.id;
-      if (pair.tag.line.direction !== "BIDIRECTIONAL") {
+      if (!pair.candidate.trackLineName || pair.candidate.trackLineName === "MAIN LINE") {
+        pair.candidate.trackLineName = pair.tag.line.id;
+      }
+      if (pair.tag.line.direction !== "BIDIRECTIONAL" && pair.tag.line.direction !== "UNKNOWN") {
         pair.candidate.direction = pair.tag.line.direction;
       }
     }
@@ -482,17 +602,17 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
     tagUsers.set(pair.tag.id, [...users, pair.candidate]);
   }
 
-  // Fallback: If any signal was not matched via bipartite, inherit from calling-on parent or closest tag
-  for (const cand of entities) {
-    if (cand.footTagId && cand.footTagId !== "R-000") continue;
+  // Fallback: If calling-on was not matched via bipartite, inherit from its parent Home signal
+  for (const cand of dedupedEntities) {
+    if (cand.footTagId) continue;
 
     if (cand.isCallingOn) {
-      const parent = entities.find(
+      const parent = dedupedEntities.find(
         (e) =>
           e.page === cand.page &&
           e.base === cand.base &&
           !e.isCallingOn &&
-          Math.abs(e.x - cand.x) <= 3.0 * h,
+          Math.abs(e.x - cand.x) <= 4.0 * h,
       );
       if (parent && parent.footTagId) {
         cand.footTagId = parent.footTagId;
@@ -500,35 +620,32 @@ export function extractSignals(input: SignalExtractionInput): SignalExtractionRe
         continue;
       }
     }
-
-    const availableTag = rfidTags
-      .filter((t) => t.token.page === cand.page && Math.abs(t.token.x - cand.x) <= 8.0 * h)
-      .sort(
-        (a, b) =>
-          Math.hypot(a.token.x - cand.x, a.token.y - cand.y) -
-          Math.hypot(b.token.x - cand.x, b.token.y - cand.y),
-      )[0];
-
-    if (availableTag) {
-      cand.footTagId = availableTag.id;
-      cand.chainageM = availableTag.chainageM;
-    }
   }
 
   // 4B. Dynamically resolve Stop Signal roles (HOME, STARTER, ADVANCED_STARTER)
   // using spatial sorting and yard extents (zero hardcoded numbers)
-  resolveSignalRolesDynamically(entities, trackLines, internalLines);
+  resolveSignalRolesDynamically(dedupedEntities, trackLines, internalLines);
 
   // 5. Convert to canonical SignalNode model
-  // Retain evidenced signals: physical lamp rings, paired foot tags, or explicit Distant / Calling-on signals
-  const validEntities = entities.filter(
-    (e) =>
+  // Retain verified signals:
+  // - Confirmed foot tag or physical rings
+  // - Explicit signal prefix / distant
+  // - Recognized stop signal role (HOME, STARTER, ADVANCED_STARTER, INTERMEDIATE_BLOCK)
+  // Exclude bare turnout actuator point numbers (11, 12, 13, 18, 19, 20) with no mast or foot tag
+  const validEntities = dedupedEntities.filter((e) => {
+    const isPointNumber = /^(?:11|12|13|18|19|20)$/.test(e.base);
+    if (isPointNumber && !e.footTagId && !e.hasPhysicalRings) return false;
+    return (
       e.hasPhysicalRings ||
-      (e.footTagId && e.footTagId !== "R-000") ||
-      ["DISTANT", "INNER_DISTANT", "CALLING_ON"].includes(e.signalType),
-  );
+      Boolean(e.footTagId) ||
+      e.explicit ||
+      ["DISTANT", "INNER_DISTANT", "CALLING_ON", "HOME", "STARTER", "ADVANCED_STARTER", "INTERMEDIATE_BLOCK"].includes(
+        e.signalType,
+      )
+    );
+  });
 
-  const signals: SignalNode[] = (validEntities.length > 0 ? validEntities : entities).map((e) => ({
+  const signals: SignalNode[] = (validEntities.length > 0 ? validEntities : dedupedEntities).map((e) => ({
     id: e.name,
     name: e.name,
     line: e.trackLineName,

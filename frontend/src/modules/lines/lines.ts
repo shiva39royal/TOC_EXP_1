@@ -107,6 +107,22 @@ export function inferLineType(name: string): LineType {
   return "COMMON_LOOP";
 }
 
+/**
+ * Standard Indian Railways line designation (e.g. Down Main, Up Main, Common Loop, Up Loop)
+ */
+export function canonicalLineName(name: string): string {
+  const v = name.toUpperCase().trim();
+  if (v.includes("COMMON") && v.includes("LOOP")) return "Common Loop";
+  if (v.includes("UP") && v.includes("LOOP")) return "Up Loop";
+  if ((v.includes("DN") || v.includes("DOWN")) && v.includes("LOOP")) return "Down Loop";
+  if (v.includes("DN") || v.includes("DOWN") || (v.includes("MAIN") && !v.includes("UP")))
+    return "Down Main";
+  if (v.includes("UP") && v.includes("MAIN")) return "Up Main";
+  if (v.includes("LOOP")) return "Common Loop";
+  if (v.includes("MAIN")) return "Down Main";
+  return name.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function inferDirection(
   name: string,
   fallback: SignalDirection = "UNKNOWN",
@@ -196,9 +212,19 @@ export function extractTrackLines(input: TrackExtractionInput): TrackExtractionR
   const h = unitHeight(texts);
 
   // 1. Detect physical track bands
-  const bands = tokens
-    .filter((token) => token.kind === "track" && Number.isFinite(token.x2))
-    .filter((token) => token.x2! - token.x >= 8 * h)
+  const rawBands = tokens
+    .filter((token) => token.kind === "track")
+    .map((token) => ({
+      ...token,
+      x2: Number.isFinite(token.x2)
+        ? token.x2!
+        : Number.isFinite(token.width)
+          ? token.x + token.width!
+          : token.x + 100,
+    }));
+
+  const bands = rawBands
+    .filter((token) => token.x2 - token.x >= 8 * h)
     .filter((token) => !token.height || (token.height >= 0.15 * h && token.height <= 3.0 * h))
     .sort((a, b) => a.page - b.page || a.x - b.x);
 
@@ -348,7 +374,7 @@ export function extractTrackLines(input: TrackExtractionInput): TrackExtractionR
       resolvedName = `LINE ${index + 1}`;
     }
 
-    line.id = resolvedName;
+    line.id = canonicalLineName(resolvedName);
     line.lineType = inferLineType(resolvedName);
     line.direction = inferDirection(resolvedName);
 

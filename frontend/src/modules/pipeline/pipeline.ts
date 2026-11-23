@@ -6,8 +6,9 @@ import type {
   TagFunctionType,
 } from "@/types/signalling";
 import { extractStationMetadata } from "../metadata/metadata";
-import { extractTrackLines } from "../lines/lines";
+import { extractTrackLines, nearestTrackLine } from "../lines/lines";
 import { extractSignals } from "../signals/signals";
+import { extractPointsAndCrossings } from "../points/points";
 import { buildRailwayGraph } from "../topology/topology_graph";
 import { synthesizeTocRoutes } from "../routes/routes";
 import { generateAllTables } from "../tables/table_generator";
@@ -95,11 +96,14 @@ export function processStationLayout(input: StationProcessingInput): StationProj
       tagType = "GATE";
     }
 
+    const assignedTrack = nearestTrackLine(rawLines, t, h, 3.5);
+    const lineName = assignedTrack?.id || trackLines[0]?.name || "MAIN LINE";
+
     rfidTagsForProject.push({
       id: `tag-${idx + 1}`,
       tagId,
       chainageM,
-      line: trackLines[0]?.name || "MAIN LINE",
+      line: lineName,
       tin: "",
       tagType,
       confidence: "HIGH",
@@ -150,9 +154,12 @@ export function processStationLayout(input: StationProcessingInput): StationProj
     }
   }
 
-  // Module 4: Points and Level Crossings purged (deferred per 7-column scope)
-  const points: any[] = [];
-  const levelCrossings: any[] = [];
+  // Module 4: Extract Point Switches and Level Crossings dynamically
+  const { points, levelCrossings } = extractPointsAndCrossings({
+    tokens,
+    trackLines,
+    internalLines: rawLines,
+  });
 
   // Module 5: Build Railway Topological Connectivity Graph
   const graph = buildRailwayGraph({

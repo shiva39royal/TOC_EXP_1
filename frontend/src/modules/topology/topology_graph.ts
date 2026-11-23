@@ -243,7 +243,9 @@ export function buildRailwayGraph(input: RailwayGraphInput): RailwayGraph {
 
     const homeSig = dirSignals.find((s) => s.signalType === "HOME");
     const callingOnSig = dirSignals.find(
-      (s) => s.signalType === "CALLING_ON" && (homeSig ? s.base === homeSig.base : true),
+      (s) =>
+        s.signalType === "CALLING_ON" &&
+        (homeSig ? s.name.replace(/\D/g, "") === homeSig.name.replace(/\D/g, "") : true),
     );
     const starters = dirSignals.filter((s) => s.signalType === "STARTER");
     const advStarter = dirSignals.find((s) => s.signalType === "ADVANCED_STARTER");

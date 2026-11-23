@@ -22,6 +22,7 @@ function latin1(bytes: Uint8Array): string {
 
 function cleanCadText(raw: string): string {
   return raw
+    .replace(/\\U\+([0-9A-Fa-f]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     .replace(/\\P/gi, " ")
     .replace(/\\[A-Za-z][^;]*;/g, "")
     .replace(/[{}]/g, "")
@@ -221,13 +222,31 @@ function dwgDatabaseToIDxf(db: DwgDatabase): IDxf {
         rotation: (Number(e.rotation ?? 0) * 180) / Math.PI,
       };
     }
+    if (t === "ATTDEF" || t === "ATTRIB") {
+      const sp = (e.insertionPoint || e.startPoint || e.alignmentPoint) as
+        | { x?: number; y?: number; z?: number }
+        | undefined;
+      return {
+        ...common,
+        type: t,
+        tag: String(e.tag || ""),
+        text: String(e.text ?? e.value ?? ""),
+        startPoint: { x: Number(sp?.x ?? 0), y: Number(sp?.y ?? 0), z: Number(sp?.z ?? 0) },
+        position: { x: Number(sp?.x ?? 0), y: Number(sp?.y ?? 0), z: Number(sp?.z ?? 0) },
+        textHeight: Number(e.textHeight ?? e.height ?? 2.5),
+        height: Number(e.textHeight ?? e.height ?? 2.5),
+        rotation: (Number(e.rotation ?? 0) * 180) / Math.PI,
+      };
+    }
     if (t === "INSERT") {
       const pos = e.insertionPoint as { x?: number; y?: number; z?: number } | undefined;
       const rawAttribs = Array.isArray(e.attribs)
         ? e.attribs
         : Array.isArray(e.attributes)
           ? e.attributes
-          : [];
+          : Array.isArray(e.subentities)
+            ? e.subentities.filter((se: any) => se && (se.type === "ATTRIB" || se.type === "ATTDEF"))
+            : [];
       return {
         ...common,
         name: String(e.name ?? ""),
@@ -240,12 +259,25 @@ function dwgDatabaseToIDxf(db: DwgDatabase): IDxf {
         rowCount: Number(e.rowCount ?? 1),
         columnSpacing: Number(e.columnSpacing ?? 0),
         rowSpacing: Number(e.rowSpacing ?? 0),
-        attribs: rawAttribs.map((a: Record<string, unknown>) => ({
-          tag: String(a.tag ?? ""),
-          text: String(a.text ?? a.value ?? ""),
-          startPoint: a.startPoint ?? a.position ?? pos,
-          position: a.position ?? a.startPoint ?? pos,
-        })),
+        attribs: rawAttribs.map((a: Record<string, unknown>) => {
+          const apt = (a.insertionPoint || a.position || a.startPoint || a.alignmentPoint || pos) as
+            | { x?: number; y?: number; z?: number }
+            | undefined;
+          return {
+            tag: String(a.tag ?? ""),
+            text: String(a.text ?? a.value ?? ""),
+            startPoint: {
+              x: Number(apt?.x ?? pos?.x ?? 0),
+              y: Number(apt?.y ?? pos?.y ?? 0),
+              z: Number(apt?.z ?? pos?.z ?? 0),
+            },
+            position: {
+              x: Number(apt?.x ?? pos?.x ?? 0),
+              y: Number(apt?.y ?? pos?.y ?? 0),
+              z: Number(apt?.z ?? pos?.z ?? 0),
+            },
+          };
+        }),
       };
     }
     if (t === "SOLID") {
@@ -292,6 +324,130 @@ function dwgDatabaseToIDxf(db: DwgDatabase): IDxf {
       viewPort: { handle: "0", ownerHandle: "0", viewPorts: [] },
     },
   };
+}
+
+function cleanCadAttributeTag(tag: string): string {
+  if (!tag) return "";
+  return tag.trim().toUpperCase().replace(/[\s.:\-_]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+interface CadOntologyCategory {
+  category: "signals" | "rfid_tags" | "points" | "tracks_tins" | "gates" | "axle_counters";
+  tagKeys: string[];
+  keywords: string[];
+}
+
+const CAD_DOMAIN_ONTOLOGY: CadOntologyCategory[] = [
+  {
+    category: "rfid_tags",
+    tagKeys: ["RFID_TAG_NO", "RFID_NO", "TAG_NO", "TYPE", "R_", "R-"],
+    keywords: ["rfid", "tag", "transponder"],
+  },
+  {
+    category: "signals",
+    tagKeys: ["SIGNAL_NO", "SIG_NO", "SIGNAL", "ASPECT", "ASPECTS", "SIGNAL_NAME", "BOARD_NAME"],
+    keywords: ["signal", "sig", "home", "starter", "distant", "advance", "calling", "nom. sig", "rev. sig", "signal base"],
+  },
+  {
+    category: "points",
+    tagKeys: [
+      "POINT_NO",
+      "PT_NO",
+      "SWITCH_NO",
+      "A_END_POINT_NO",
+      "B_END_POINT_NO",
+      "PA",
+      "PB",
+      "P_",
+      "P-",
+      "POINT",
+      "TURNOUT",
+      "CROSSOVER",
+    ],
+    keywords: ["point", "turnout", "switch", "crossover", "mechine", "trap point", "sdg point"],
+  },
+  {
+    category: "gates",
+    tagKeys: ["LC_NO", "GATE_NO", "BARRIER_NO"],
+    keywords: ["gate", "barrier", "level crossing", "lc"],
+  },
+  {
+    category: "tracks_tins",
+    tagKeys: ["TRACK_NO", "TIN_NO", "BERTH_NO"],
+    keywords: ["track", "tin", "rail", "berth"],
+  },
+  {
+    category: "axle_counters",
+    tagKeys: ["DP_NO", "AXLE_NO", "RESET_NO", "BPAC_RIGHT", "BPAC_LEFT"],
+    keywords: ["axle", "dp", "bpac", "counter"],
+  },
+];
+
+function resolveBlockIdentity(
+  blockName: string,
+  blocksRecord?: Record<string, { name: string; position?: { x: number; y: number }; entities: unknown[] }>,
+  depth = 0,
+): { realName: string; attribs: Array<{ tag: string; text: string }>; tags: string[]; innerPos?: { x: number; y: number } } {
+  if (depth > 5 || !blockName || !blocksRecord) {
+    return { realName: blockName, attribs: [], tags: [] };
+  }
+  const blk = blocksRecord[blockName];
+  if (!blk) return { realName: blockName, attribs: [], tags: [] };
+
+  const attribs: Array<{ tag: string; text: string }> = [];
+  const tags: string[] = [];
+  let resolvedName = blockName;
+  let innerPos: { x: number; y: number } | undefined = undefined;
+
+  for (const be of (blk.entities ?? []) as any[]) {
+    if (be.type === "ATTDEF" || be.type === "ATTRIB") {
+      const tag = cleanCadAttributeTag(String(be.tag || be.text || ""));
+      const text = cleanCadText(String(be.text || be.value || ""));
+      attribs.push({ tag, text });
+      tags.push(tag);
+    } else if (be.type === "INSERT") {
+      if (!innerPos && be.position) {
+        innerPos = { x: be.position.x, y: be.position.y };
+      }
+      const inner = resolveBlockIdentity(String(be.name || ""), blocksRecord, depth + 1);
+      attribs.push(...inner.attribs);
+      tags.push(...inner.tags);
+      if (!inner.realName.startsWith("*U")) {
+        resolvedName = inner.realName;
+      }
+    }
+  }
+
+  return { realName: resolvedName, attribs, tags, innerPos };
+}
+
+function classifyCadEntity(
+  blockName: string,
+  layer: string,
+  attribTags: string[] = [],
+  text = "",
+): "signals" | "rfid_tags" | "points" | "tracks_tins" | "gates" | "axle_counters" | "other" {
+  const nameLow = blockName.toLowerCase();
+  const layerLow = layer.toLowerCase();
+  const textLow = text.toLowerCase();
+  const normTags = new Set(attribTags.map(cleanCadAttributeTag));
+
+  for (const rule of CAD_DOMAIN_ONTOLOGY) {
+    if (rule.tagKeys.some((k) => normTags.has(k))) return rule.category;
+  }
+  for (const rule of CAD_DOMAIN_ONTOLOGY) {
+    if (rule.keywords.some((kw) => nameLow.includes(kw) || layerLow.includes(kw))) {
+      return rule.category;
+    }
+  }
+  if (textLow) {
+    for (const rule of CAD_DOMAIN_ONTOLOGY) {
+      if (rule.keywords.some((kw) => textLow.includes(kw))) {
+        return rule.category;
+      }
+    }
+  }
+  return "other";
 }
 
 function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadVersion?: string) {
@@ -342,6 +498,19 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
     });
   };
 
+  let nominalSigCount = 0;
+  let reverseSigCount = 0;
+
+  // Pre-collect top-level model space texts for geometric correlation
+  const modelTexts: Array<{ text: string; x: number; y: number; layer: string }> = [];
+  for (const ent of dxfData.entities ?? []) {
+    if (ent.type === "TEXT" || ent.type === "MTEXT" || ent.type === "ATTDEF" || ent.type === "ATTRIB") {
+      const pt = (ent as any).position ?? (ent as any).startPoint ?? { x: 0, y: 0 };
+      const raw = cleanCadText(String((ent as any).text || (ent as any).value || ""));
+      if (raw) modelTexts.push({ text: raw, x: pt.x, y: pt.y, layer: String((ent as any).layer || "0") });
+    }
+  }
+
   const walkEntities = (
     entities: IDxf["entities"] | undefined,
     offsetX: number,
@@ -371,6 +540,7 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
       if (ent.type === "INSERT") {
         const ins = ent as unknown as {
           name?: string;
+          layer?: string;
           position?: { x: number; y: number };
           xScale?: number;
           yScale?: number;
@@ -383,6 +553,262 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
             startPoint?: { x: number; y: number };
           }>;
         };
+
+        const entLayer = String(ins.layer || (ent as any).layer || "0");
+        const bName = String(ins.name || "");
+        const rawAttribs = Array.isArray(ins.attribs) ? ins.attribs : [];
+        const attribTags = rawAttribs.map((a) => a.tag || "");
+        
+        // Deep resolution for anonymous dynamic blocks (*U...)
+        const resolved = resolveBlockIdentity(bName, dxfData.blocks as any);
+        const effectiveName = !bName.startsWith("*U") ? bName : resolved.realName;
+        const allTags = attribTags.concat(resolved.tags);
+
+        // If block was inserted at origin (0, 0), resolve to inner insert's true position
+        let actualX = ins.position?.x ?? 0;
+        let actualY = ins.position?.y ?? 0;
+        if (Math.abs(actualX) < 0.1 && Math.abs(actualY) < 0.1 && resolved.innerPos) {
+          actualX = resolved.innerPos.x;
+          actualY = resolved.innerPos.y;
+        }
+
+        const category = classifyCadEntity(effectiveName, entLayer, allTags);
+        const worldPos = transformPt(actualX, actualY);
+
+        // High-level semantic railway equipment is identified at top-level (depth === 0)
+        // to prevent duplicate ghost entities from internal block symbol graphics.
+        if (depth === 0 && category === "signals") {
+          const isNominal = /nom|down|dn/i.test(entLayer) || /nom|down|dn/i.test(effectiveName);
+          const isReverse = /rev|up/i.test(entLayer) || /rev|up/i.test(effectiveName);
+          const dir = isNominal ? "DOWN" : isReverse ? "UP" : "UNKNOWN";
+
+          let sigLabel = "";
+          // 1. Explicit attribute tags
+          for (const a of rawAttribs.concat(resolved.attribs)) {
+            const t = (a.tag || "").toUpperCase();
+            if (/SIGNAL|SIG|NAME|ID|NO/i.test(t)) {
+              sigLabel = cleanCadText(String(a.text || a.value || ""));
+              if (sigLabel && !/^(?:S|R|P|T)-?$/i.test(sigLabel)) break;
+            }
+          }
+
+          // 2. Geometric spatial correlation with nearby modelspace text (within 120 units)
+          if (!sigLabel) {
+            const nearbyTexts = modelTexts
+              .map((t) => ({ ...t, dist: Math.hypot(t.x - worldPos.x, t.y - worldPos.y) }))
+              .filter((t) => t.dist <= 120)
+              .sort((a, b) => a.dist - b.dist);
+
+            for (const nt of nearbyTexts) {
+              const cleaned = nt.text.trim();
+              if (/^(?:S|SH|C|IB|G)\s*\d+[A-Z]?$/i.test(cleaned)) {
+                sigLabel = cleaned.replace(/\s+/g, "");
+                break;
+              }
+              const mSigRef = cleaned.match(/\bfor\s+(?:signal\s+)?([SC]\d{1,3}(?:\/[A-Z0-9]+)?)/i);
+              if (mSigRef) {
+                sigLabel = mSigRef[1].replace(/\s+/g, "");
+                break;
+              }
+              const mGateRef = cleaned.match(/\bLC(?:\.|\s*No\.?:?|\s*Gate\.?:?)\s*(\d+)/i);
+              if (mGateRef) {
+                sigLabel = `G${mGateRef[1]}`;
+                break;
+              }
+              if (/Mid Section Modified|Semi Automatic Stop Signal|IB Sort/i.test(cleaned)) {
+                sigLabel = isNominal ? "IB-DN" : "IB-UP";
+                break;
+              }
+            }
+          }
+
+          // 3. Keep authentic identity (never synthesize fake signal numbers!)
+          if (!sigLabel) {
+            if (/route\s*indicator/i.test(effectiveName)) {
+              sigLabel = "RI";
+            }
+          }
+
+          if (sigLabel) {
+            layoutTokens.push({
+              text: sigLabel,
+              kind: "signal",
+              page: 1,
+              x: worldPos.x,
+              y: -worldPos.y,
+              width: 20,
+              height: 20,
+              direction: dir,
+              layer: entLayer,
+              blockName: bName,
+            });
+
+            pushText(sigLabel, worldPos.x, worldPos.y);
+          }
+
+          layoutTokens.push({
+            text: "",
+            kind: "ring",
+            page: 1,
+            x: worldPos.x,
+            y: -worldPos.y,
+            width: 10,
+            height: 10,
+          });
+        } else if (depth === 0 && category === "rfid_tags") {
+          let tagType = "";
+          let tagId = "";
+          for (const a of rawAttribs.concat(resolved.attribs)) {
+            const t = (a.tag || "").toUpperCase();
+            if (t === "TYPE" && a.text) {
+              const parsedType = cleanCadText(String(a.text)).toUpperCase();
+              if (/^[NSTXGALD]$/.test(parsedType)) tagType = parsedType;
+            }
+            if (/TAG|RFID|NO/i.test(t)) {
+              const val = cleanCadText(String(a.text || (a as any).value || ""));
+              if (val && !/^(?:R-?|0)$/i.test(val)) tagId = val;
+            }
+          }
+
+          if (!tagType) {
+            const mType = (bName + " " + resolved.realName).match(/RFID\s*-\s*([NSTXGALD])/i);
+            if (mType) tagType = mType[1].toUpperCase();
+          }
+
+          const tagTypeNames: Record<string, string> = {
+            N: "NORMAL TAG",
+            S: "SIGNAL FOOT TAG",
+            T: "TIN DISCRIMINATION / TURNOUT TAG",
+            X: "EXIT TAG",
+            G: "GATE TAG",
+            A: "ADJUSTMENT / JUNCTION TAG",
+            L: "ADJACENT LINE TAG",
+            D: "DEAD STOP TAG",
+          };
+
+          if (!tagId) {
+            const nearbyTagTexts = modelTexts
+              .map((t) => ({ ...t, dist: Math.hypot(t.x - worldPos.x, t.y - worldPos.y) }))
+              .filter((t) => t.dist <= 35)
+              .sort((a, b) => a.dist - b.dist);
+            for (const nt of nearbyTagTexts) {
+              const cl = nt.text.trim();
+              if (/^R[-_.]?\d+/i.test(cl) || /LOC\.[12]:/i.test(cl) || /COMM\./i.test(cl) || /\(\d+m\)/.test(cl)) {
+                tagId = cl;
+                break;
+              }
+            }
+          }
+
+          const effectiveTagLabel = tagId || (tagType ? `RFID-${tagType}` : "RFID");
+          layoutTokens.push({
+            text: effectiveTagLabel,
+            tagType: tagType || "N",
+            tagTypeName: tagTypeNames[tagType] || "RFID TAG",
+            kind: "rfid",
+            page: 1,
+            x: worldPos.x,
+            y: -worldPos.y,
+            width: 15,
+            height: 15,
+            layer: entLayer,
+            blockName: bName,
+          });
+          if (tagId) {
+            pushText(tagId, worldPos.x, worldPos.y);
+          }
+        } else if (depth === 0 && category === "points") {
+          const isCrossover =
+            allTags.includes("A_END_POINT_NO") ||
+            allTags.includes("B_END_POINT_NO") ||
+            allTags.includes("PA") ||
+            allTags.includes("PB") ||
+            /crossover|mechine/i.test(effectiveName);
+
+          let paVal = "";
+          let pbVal = "";
+          let ptVal = "";
+          for (const a of rawAttribs.concat(resolved.attribs)) {
+            const t = cleanCadAttributeTag(a.tag || "");
+            const v = cleanCadText(a.text || (a as any).value || "");
+            if (/A_END|PA/i.test(t) && v && !/^(?:P-|PA)$/i.test(v)) paVal = v;
+            else if (/B_END|PB/i.test(t) && v && !/^(?:P-|PB)$/i.test(v)) pbVal = v;
+            else if (/POINT_NO|PT_NO|POINT/i.test(t) && v && !/^(?:P-|P)$/i.test(v)) ptVal = v;
+          }
+
+          // If attribute values were template placeholders, correlate with nearby point texts in modelspace
+          if (!paVal && !pbVal && !ptVal) {
+            const nearbyPts = modelTexts
+              .map((t) => ({ ...t, dist: Math.hypot(t.x - worldPos.x, t.y - worldPos.y) }))
+              .filter((t) => t.dist <= 65 && (/^P[-_ ]?\d+[A-Z]?$/i.test(t.text.trim()) || /^P\d/i.test(t.text.trim())))
+              .sort((a, b) => a.dist - b.dist);
+            if (nearbyPts.length > 0) {
+              ptVal = nearbyPts[0].text.trim();
+              if (nearbyPts.length > 1) {
+                paVal = nearbyPts[0].text.trim();
+                pbVal = nearbyPts[1].text.trim();
+              }
+            }
+          }
+
+          if (paVal || pbVal || ptVal) {
+            const nameA = paVal ? (paVal.startsWith("P") ? paVal : `P${paVal}`) : "P1A";
+            const nameB = pbVal ? (pbVal.startsWith("P") ? pbVal : `P${pbVal}`) : "P1B";
+
+            if (isCrossover) {
+              layoutTokens.push({
+                text: nameA,
+                kind: "point",
+                page: 1,
+                x: worldPos.x - 20,
+                y: -worldPos.y,
+                width: 15,
+                height: 15,
+                layer: entLayer,
+                blockName: bName,
+              });
+              pushText(nameA, worldPos.x - 20, worldPos.y);
+
+              layoutTokens.push({
+                text: nameB,
+                kind: "point",
+                page: 1,
+                x: worldPos.x + 20,
+                y: -worldPos.y,
+                width: 15,
+                height: 15,
+                layer: entLayer,
+                blockName: bName,
+              });
+              pushText(nameB, worldPos.x + 20, worldPos.y);
+
+              layoutTokens.push({
+                text: `${nameA}/${nameB}`,
+                kind: "link",
+                page: 1,
+                x: worldPos.x - 20,
+                y: -worldPos.y,
+                x2: worldPos.x + 20,
+                y2: -worldPos.y - 25,
+                label: `${nameA}/${nameB}`,
+              });
+            } else {
+              const ptLabel = ptVal || (effectiveName.includes("Trap") ? "P-Trap" : "P1");
+              layoutTokens.push({
+                text: ptLabel,
+                kind: "point",
+                page: 1,
+                x: worldPos.x,
+                y: -worldPos.y,
+                width: 15,
+                height: 15,
+                layer: entLayer,
+                blockName: bName,
+              });
+              pushText(ptLabel, worldPos.x, worldPos.y);
+            }
+          }
+        }
 
         if (Array.isArray(ins.attribs)) {
           for (const attr of ins.attribs) {
@@ -413,11 +839,12 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
       } else if (
         ent.type === "TEXT" ||
         ent.type === "MTEXT" ||
-        ent.type === "ATTDEF" ||
+        (depth === 0 && ent.type === "ATTDEF") ||
         ent.type === "ATTRIB"
       ) {
         const txtEnt = ent as unknown as {
           text?: string;
+          layer?: string;
           startPoint?: { x: number; y: number };
           position?: { x: number; y: number };
           textHeight?: number;
@@ -453,6 +880,10 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
           });
         }
       } else if (ent.type === "LINE" || ent.type === "LWPOLYLINE" || ent.type === "POLYLINE") {
+        const entLayer = String((ent as any).layer || "0").toLowerCase();
+        const isTrackLayer = entLayer.includes("track") || entLayer.includes("rail");
+        const isPointLayer = entLayer.includes("point") || entLayer.includes("turnout") || entLayer.includes("crossover");
+
         const poly = ent as unknown as { vertices?: Array<{ x: number; y: number }> };
         const vertices = poly.vertices ?? [];
         for (let i = 0; i + 1 < vertices.length; i += 1) {
@@ -460,7 +891,7 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
           const b = transformPt(vertices[i + 1]!.x, vertices[i + 1]!.y);
           const dx = Math.abs(b.x - a.x);
           const dy = Math.abs(b.y - a.y);
-          if (dx > 0 && dy <= dx * 0.01) {
+          if (isTrackLayer || (dx > 0 && dy <= dx * 0.05)) {
             layoutTokens.push({
               text: "",
               kind: "track",
@@ -469,8 +900,7 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
               x2: Math.max(a.x, b.x),
               y: -(a.y + b.y) / 2,
             });
-          } else if (dy > dx * 0.15 && dx > dy * 0.25) {
-            // Slanted segment: a possible turnout leg; the extractor keeps it only if it joins two lines.
+          } else if (isPointLayer || (dy > dx * 0.15 && dx > dy * 0.25)) {
             layoutTokens.push({
               text: "",
               kind: "link",
@@ -515,6 +945,80 @@ function summarizeDxf(dxfData: IDxf, fileName: string, kind: "DWG" | "DXF", cadV
   };
 
   walkEntities(dxfData.entities, 0, 0, 1, 1, 0, 0);
+
+  // Extract authentic modelspace RFID tags from layer "8. RFID Tags" and genuine tag annotations
+  const seenTagCoords = new Set<string>();
+  for (const t of modelTexts) {
+    if (
+      t.layer === "8. RFID Tags" ||
+      /^LOC\.[12]:/i.test(t.text) ||
+      /^\(\d+m\)$/.test(t.text) ||
+      /COMM\.\s*(?:ENTRY|EXIT)/i.test(t.text) ||
+      /^\(Nominal to Reverse\)/i.test(t.text) ||
+      /^R[-_.]?\d+/i.test(t.text)
+    ) {
+      const coordKey = `${Math.round(t.x)}_${Math.round(t.y)}`;
+      if (seenTagCoords.has(coordKey)) continue;
+      seenTagCoords.add(coordKey);
+
+      layoutTokens.push({
+        text: t.text,
+        kind: "rfid",
+        page: 1,
+        x: t.x,
+        y: -t.y,
+        width: 15,
+        height: 15,
+        layer: t.layer,
+      });
+      pushText(t.text, t.x, t.y);
+    }
+  }
+
+  // Extract authentic point machine annotations from modelspace text (e.g. P12A, P12B, P18A, P18B)
+  const seenPointCoords = new Set<string>();
+  for (const t of modelTexts) {
+    if (
+      t.layer === "3. Points" ||
+      /^P[-_ ]?\d+[A-Z]?$/i.test(t.text.trim()) ||
+      /^P\d/i.test(t.text.trim())
+    ) {
+      const cleanPt = t.text.trim().replace(/\s+/g, "").toUpperCase();
+      if (!/^(?:P|P-|POINT|PT)$/i.test(cleanPt)) {
+        const coordKey = `${Math.round(t.x)}_${Math.round(t.y)}`;
+        if (!seenPointCoords.has(coordKey)) {
+          seenPointCoords.add(coordKey);
+          layoutTokens.push({
+            text: cleanPt,
+            kind: "point",
+            page: 1,
+            x: t.x,
+            y: -t.y,
+            width: 15,
+            height: 15,
+            layer: t.layer,
+          });
+          pushText(cleanPt, t.x, t.y);
+        }
+      }
+    }
+  }
+
+  // Scan block definitions ONLY if model space had very few texts (e.g. title block inside *T...)
+  const hasRealModelTexts = collectedTexts.some((t) => t.x > 1000);
+  if (!hasRealModelTexts) {
+    for (const [blkName, blk] of Object.entries(dxfData.blocks ?? {})) {
+      for (const be of (blk.entities ?? []) as any[]) {
+        if (be.type === "TEXT" || be.type === "MTEXT") {
+          const raw = be.text ? cleanCadText(be.text) : "";
+          if (raw && (/KAVACH|TCAS|LAYOUT|\([A-Z]{2,5}\)|STATION|STN/i.test(raw) || scoreTextPriority(raw) >= 3)) {
+            const pt = be.position ?? be.startPoint ?? { x: 0, y: 0 };
+            pushText(raw, pt.x, pt.y, Number(be.textHeight ?? be.height ?? 0));
+          }
+        }
+      }
+    }
+  }
 
   // Sort by signalling relevance first so critical station codes, signals, tags & TINs are never truncated,
   // then order selected items spatially (top-to-bottom band, left-to-right) for readable schematic reconstruction.

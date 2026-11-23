@@ -4,7 +4,17 @@ export type LineType =
 export type SignalDirection = "UP" | "DOWN" | "BIDIRECTIONAL" | "UNKNOWN";
 
 export type TagFunctionType =
-  "SIGNAL_FOOT" | "NORMAL" | "LOOP" | "GATE" | "BOUNDARY" | "DEAD_END" | "UNKNOWN";
+  | "SIGNAL_FOOT"
+  | "NORMAL"
+  | "TURNOUT"
+  | "EXIT"
+  | "GATE"
+  | "ADJUSTMENT"
+  | "ADJACENT_LINE"
+  | "LOOP"
+  | "BOUNDARY"
+  | "DEAD_END"
+  | "UNKNOWN";
 
 export type ConfidenceLevel = "HIGH" | "MEDIUM" | "LOW";
 
@@ -25,6 +35,9 @@ export interface StationMetadata {
   chainageDirection: "LEFT_INCREASING" | "RIGHT_INCREASING" | "UNKNOWN";
   nextDownStationId: string;
   nextUpStationId: string;
+  nextDownExitSignal?: string | undefined;
+  nextUpExitSignal?: string | undefined;
+  adjacentDistantSignal?: string | undefined;
   preparedBy: string;
   checkedBy: string;
   approvedBy?: string | undefined;
@@ -99,6 +112,7 @@ export interface SignalNode {
   notes?: string;
   x?: number;
   y?: number;
+  turnoutSpeedKmph?: number | null;
 }
 
 export interface PointSwitch {
@@ -112,6 +126,8 @@ export interface PointSwitch {
   turnoutLengthM?: number;
   confidence: ConfidenceLevel;
   notes?: string;
+  x?: number;
+  y?: number;
 }
 
 export interface RfidTag {
@@ -125,6 +141,8 @@ export interface RfidTag {
   confidence: ConfidenceLevel;
   verified: boolean;
   notes?: string;
+  x?: number;
+  y?: number;
 }
 
 export interface LevelCrossing {
@@ -354,6 +372,10 @@ export interface SourceLayoutAsset {
   blockCount?: number | undefined;
   entityCount?: number | undefined;
   cadVersion?: string | undefined;
+  cadDocId?: string | undefined;
+  cadRenderUrl?: string | undefined;
+  cadComponents?: any[] | undefined;
+  kavachData?: any | undefined;
 }
 
 export interface StationProject {

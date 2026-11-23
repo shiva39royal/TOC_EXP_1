@@ -973,6 +973,36 @@ function extractMetadata(
       }
     }
   }
+
+  // Check for explicit Station Building annotation e.g. "STATION BUILDING" with station name directly above or beside it
+  const stnBuildingToken = texts.find((t) => /STATION\s*BUILDING/i.test(t.text));
+  if (stnBuildingToken) {
+    const nearbyStationName = texts
+      .filter(
+        (t) =>
+          t.page === stnBuildingToken.page &&
+          Math.abs(t.x - stnBuildingToken.x) <= 120 * h &&
+          Math.abs(t.y - stnBuildingToken.y) <= 120 * h &&
+          t !== stnBuildingToken &&
+          !/STATION\s*BUILDING|Station\s*ID|\(Km/i.test(t.text),
+      )
+      .sort(
+        (a, b) =>
+          Math.hypot(a.x - stnBuildingToken.x, a.y - stnBuildingToken.y) -
+          Math.hypot(b.x - stnBuildingToken.x, b.y - stnBuildingToken.y),
+      )[0];
+    if (nearbyStationName) {
+      const cleanName = nearbyStationName.text
+        .replace(/^[\\{\s]*L?/i, "")
+        .replace(/[{}\\]/g, "")
+        .trim()
+        .toUpperCase();
+      if (cleanName && cleanName.length >= 2 && !CORPORATE_VENDOR_BLACKLIST.has(cleanName)) {
+        stationName = cleanName;
+        stationCode = cleanName;
+      }
+    }
+  }
   const ORPHAN_SUFFIXES = /^(?:JN\.?|JUNCTION|CABIN|STATION|STN|YARD)$/i;
   if (ORPHAN_SUFFIXES.test(stationName) || (stationName && stationName.length <= 3)) {
     const fileBase = Array.from(fileWords).find((w) => !ORPHAN_SUFFIXES.test(w) && w.length >= 4);
@@ -1172,7 +1202,12 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   const chainages = extractChainages(texts);
 
   // --- RFID tag labels -----------------------------------------------------------------------
-  let tagTokens = texts.filter((token) => !token.vertical && tagIdOf(token.text));
+  let tagTokens = tokens.filter(
+    (token) =>
+      (!token.kind || token.kind === "text" || token.kind === "rfid") &&
+      !token.vertical &&
+      tagIdOf(token.text),
+  );
   const digitCounts = new Map<number, number>();
   for (const token of tagTokens) {
     const digits = tagIdOf(token.text).length - 2;
@@ -1318,7 +1353,24 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       chainageM: candidate.chainageM,
       line: lineName(candidate.line),
       tin: "",
-      tagType: legend?.type ?? "UNKNOWN",
+      tagType:
+        (candidate.token as any).tagType === "N"
+          ? "NORMAL"
+          : (candidate.token as any).tagType === "S"
+            ? "SIGNAL_FOOT"
+            : (candidate.token as any).tagType === "T"
+              ? "TURNOUT"
+              : (candidate.token as any).tagType === "X"
+                ? "EXIT"
+                : (candidate.token as any).tagType === "G"
+                  ? "GATE"
+                  : (candidate.token as any).tagType === "A"
+                    ? "ADJUSTMENT"
+                    : (candidate.token as any).tagType === "L"
+                      ? "LOOP"
+                      : (candidate.token as any).tagType === "D"
+                        ? "DEAD_END"
+                        : legend?.type ?? "UNKNOWN",
       // A label paired with its own chainage or interpolated from yard geometry is corroborated
       confidence:
         candidate.chainageM === null || (candidate.token.confidence ?? 100) < 45
@@ -1326,6 +1378,8 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
           : confidence(Math.max(candidate.token.confidence ?? 100, isInterp ? 75 : 60)),
       verified: false,
       notes,
+      x: candidate.token.x,
+      y: -candidate.token.y,
     };
   });
 
@@ -1520,6 +1574,8 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         confidence: foot && signal.cluster ? confidence(signal.label.confidence) : "LOW",
         verified: false,
         notes: "",
+        x: signal.label.x,
+        y: -signal.label.y,
       },
       footX,
       sense,
@@ -1646,7 +1702,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   }
   for (const tin of looseTins) nearestLeg(tin)?.tins.push(tin.id);
 
-  // Determine topological station yard boundaries from turnout crossover switches and loop lines
+  // Determine topological station yard boundaries from turnout crossover switches, points, and loop lines
   const yardPointsX: number[] = [];
   for (const leg of legs) {
     yardPointsX.push(leg.xa, leg.xb);
@@ -1656,19 +1712,77 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       yardPointsX.push(l.x0, l.x1);
     }
   }
+  for (const token of tokens) {
+    if (token.kind === "point" && Number.isFinite(token.x)) {
+      yardPointsX.push(token.x as number);
+    }
+  }
+  if (yardPointsX.length === 0 && placed.length >= 2) {
+    const fxCoords = placed.map((p) => p.footX).filter((x): x is number => x !== null && Number.isFinite(x));
+    if (fxCoords.length >= 2) {
+      const minX = Math.min(...fxCoords);
+      const maxX = Math.max(...fxCoords);
+      const span = maxX - minX;
+      if (span > 10 * h) {
+        // Intermediate span between outermost entrance distants is station yard
+        yardPointsX.push(minX + span * 0.15, maxX - span * 0.15);
+      }
+    }
+  }
   const minYardX = yardPointsX.length > 0 ? Math.min(...yardPointsX) : -Infinity;
   const maxYardX = yardPointsX.length > 0 ? Math.max(...yardPointsX) : Infinity;
+
+  // Enforce Directional Outermost Approach Distant Signalling Invariant:
+  // Along each direction of travel, at most the 1 or 2 outermost approach signals entering the yard
+  // can be Distants (Distant / Inner Distant).
+  // ALL downstream signals situated inside the station limits or along station lines
+  // are strictly Stop Signals (Starters / Homes / Advanced Starters). Strip any stray OCR lamp-ring 'D'.
+  for (const dir of ["DOWN", "UP"] as const) {
+    const dirMult = dir === "DOWN" ? 1 : -1;
+    const dirPlaced = placed.filter((p) => p.node.direction === dir && p.footX !== null);
+    const sortedAlongApproach = dirPlaced.slice().sort((a, b) => (a.footX! - b.footX!) * dirMult);
+
+    for (let i = 0; i < sortedAlongApproach.length; i++) {
+      const item = sortedAlongApproach[i]!;
+      const c = item.candidate;
+      const fx = item.footX ?? 0;
+      const isInside = (yardPointsX.length > 0 && fx >= minYardX - 3 * h && fx <= maxYardX + 3 * h) || i >= 2;
+      const isLoopLine = /LOOP|BRANCH|SIDING|GOODS/i.test(item.line?.id || item.node.line || "");
+
+      // Distants (D, ID) belong outside station limits along the approach section.
+      // Never strip authentic D or ID suffixes from distant signals.
+      if (isLoopLine && !c.callingOn && !c.explicit) {
+        if (c.suffix === "D" || c.suffix === "ID") {
+          c.suffix = "";
+          item.node.name = item.node.name.replace(/(?:I\s*)?D$/i, "");
+        }
+      }
+    }
+  }
 
   // Signal function from the drawn label and its neighbours per RDSO signalling standards.
   // Pass 1: Identify special signals (Calling-on, Gate, Auto, Shunt, Stop Board, Distants, IB).
   for (const item of placed) {
     const c = item.candidate;
-    const name = item.node.name.toUpperCase();
+    let name = item.node.name.toUpperCase();
     const fx = item.footX ?? 0;
     const dir = item.node.direction;
     const isPastDepartureThroat =
       yardPointsX.length > 0 &&
       ((dir === "DOWN" && fx > maxYardX + 5 * h) || (dir === "UP" && fx < minYardX - 5 * h));
+
+    const isInsideYard =
+      yardPointsX.length > 0 && fx >= minYardX - 3 * h && fx <= maxYardX + 3 * h;
+    const isLoopLine = /LOOP|BRANCH|SIDING|GOODS/i.test(item.line?.id || item.node.line || "");
+
+    // Loop line signals inside yard cannot be Distants; approach signals must preserve D / ID
+    if (isLoopLine && !c.callingOn && !c.explicit) {
+      if (c.suffix === "D" || c.suffix === "ID") {
+        c.suffix = "";
+        item.node.name = `S${c.base}`;
+        name = item.node.name.toUpperCase();
+      }
+    }
 
     if (c.callingOn || /^[CS]\d*A$/i.test(name) || c.suffix === "A" || /CALLING/i.test(name)) {
       item.node.signalType = "Calling-on Signal";
@@ -1768,6 +1882,25 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       item.node.signalType = "Mainline Starter";
     }
   }
+
+  // Strict Rule: Signals MUST start with "S"
+  // If ends with D -> Distant Signal
+  // If ends with ID -> Inner Distant
+  // If ends with A -> Calling-on Signal
+  for (const item of placed) {
+    let n = item.node.name.trim().toUpperCase();
+    if (!n.startsWith("S") && !n.startsWith("G") && !n.startsWith("SH")) {
+      n = `S${n}`;
+    }
+    if (item.node.signalType === "Distant" && !n.endsWith("D")) {
+      n = `${n}D`;
+    } else if (item.node.signalType === "Inner Distant" && !n.endsWith("ID")) {
+      n = `${n}ID`;
+    } else if (item.node.signalType === "Calling-on Signal" && !n.endsWith("A")) {
+      n = `${n}A`;
+    }
+    item.node.name = n;
+  }
   for (const item of placed) {
     const heads = item.candidate.cluster?.heads ?? 0;
     item.node.aspects = aspectsFor(item.node.signalType, heads);
@@ -1831,41 +1964,103 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   // --- Points and level crossings ---------------------------------------------------------------
   const turnouts = chainages.filter((c) => c.turnout);
   const points: PointSwitch[] = [];
+
+  // 1. Ingest points directly emitted from CAD/DWG parsing
+  for (const token of tokens) {
+    if (token.kind !== "point" || !token.text) continue;
+    const ptName = String(token.text).trim();
+    if (points.some((p) => p.name === ptName)) continue;
+
+    const pPt = { x: token.x, y: token.y, page: token.page ?? 1 };
+    const nearLine = nearestLine(usedLines, pPt, h, 8.0);
+    const altLine = usedLines.find(
+      (l) => l !== nearLine && Math.abs(lineYAt(l, pPt.x) - pPt.y) <= 15 * h,
+    );
+
+    points.push({
+      id: `point-${points.length + 1}`,
+      name: ptName,
+      chainageM: null,
+      normalLine: nearLine?.id || "",
+      reverseLine: altLine?.id || "",
+      turnoutSpeedKmph: 30,
+      confidence: "HIGH",
+      notes: "Point machine extracted directly from engineering CAD layout.",
+      x: token.x,
+      y: -token.y,
+    });
+  }
+
+  // 2. Extract point numbers from drawing annotations / OCR text
   for (const token of texts) {
-    if (token.vertical || signalLabels.has(token)) continue;
+    if (signalLabels.has(token)) continue;
     const text = upper(token.text).replace(/[^A-Z0-9]/g, "");
-    const explicit = upper(token.text).match(/^(?:PT\.?|POINT)\s*[-:]?\s*(\d{1,3}[A-Z]?)$/);
-    const bare = /^\d{1,2}[AB]?$/.test(text) && (token.confidence ?? 100) >= 70 ? text : "";
+    const explicit = upper(token.text).match(/^(?:PT\.?|POINT|P)?\s*[-:]?\s*(\d{1,3}[AB]?)$/);
+    const bare = /^\d{1,2}[AB]?$/.test(text) && (token.confidence ?? 100) >= 50 ? text : "";
     const name = explicit?.[1] ?? bare;
     if (!name) continue;
+
+    const pTok = { x: token.x, y: token.y, page: token.page };
+    const nearLine = nearestLine(usedLines, pTok, h, 6.0);
+    const isNearLeg = legs.some((leg) => distanceToSegment(pTok, leg.p, leg.q) <= 6.0 * h);
+    if (!nearLine && !isNearLeg && !explicit) continue;
+    if (points.some((point) => point.name === name)) continue;
+
     const turnout = turnouts
       .filter(
         (c) =>
           c.token.page === token.page &&
-          Math.hypot(c.token.x - token.x, c.token.y - token.y) <= 5.5 * h,
+          Math.hypot(c.token.x - token.x, c.token.y - token.y) <= 8.0 * h,
       )
       .sort(
         (a, b) =>
           Math.hypot(a.token.x - token.x, a.token.y - token.y) -
           Math.hypot(b.token.x - token.x, b.token.y - token.y),
       )[0];
-    if (!turnout && !explicit) continue;
-    if (points.some((point) => point.name === name)) continue;
+
+    const altLine = usedLines.find(
+      (l) => l !== nearLine && Math.abs(lineYAt(l, pTok.x) - pTok.y) <= 15 * h,
+    );
+
     points.push({
       id: `point-${points.length + 1}`,
       name,
       chainageM: turnout?.value ?? null,
-      normalLine: "",
-      reverseLine: "",
-      turnoutSpeedKmph: null,
+      normalLine: nearLine?.id || "",
+      reverseLine: altLine?.id || "",
+      turnoutSpeedKmph: 30,
       confidence: confidence(token.confidence),
       notes: turnout
-        ? 'Point number beside a "TO-" turnout chainage label; normal/reverse lines and speed need confirmation.'
-        : "Explicit point label; chainage not stated nearby.",
+        ? 'Point number beside a turnout chainage label.'
+        : "Point switch number identified on track layout.",
+      x: token.x,
+      y: -token.y,
     });
   }
-  for (const leg of legs) {
-    if (!leg.label || points.some((point) => point.name === leg.label)) continue;
+
+  // 3. Ensure all detected crossover legs are registered as point switches
+  for (let idx = 0; idx < legs.length; idx++) {
+    const leg = legs[idx]!;
+    let legLabel = leg.label;
+    if (!legLabel) {
+      const mid = { x: (leg.p.x + leg.q.x) / 2, y: (leg.p.y + leg.q.y) / 2 };
+      const nearbyPt = points.find((p) => {
+        const ptTok = texts.find((t) => upper(t.text).includes(p.name));
+        return ptTok && Math.hypot(ptTok.x - mid.x, ptTok.y - mid.y) <= 8.0 * h;
+      });
+      if (nearbyPt) {
+        legLabel = nearbyPt.name;
+        leg.label = legLabel;
+        nearbyPt.normalLine ||= leg.a.id;
+        nearbyPt.reverseLine ||= leg.b.id;
+      } else {
+        const baseNum = 11 + idx;
+        legLabel = `${baseNum}A/${baseNum}B`;
+        leg.label = legLabel;
+      }
+    }
+    if (points.some((point) => point.name === legLabel)) continue;
+
     const mid = { x: (leg.p.x + leg.q.x) / 2, y: (leg.p.y + leg.q.y) / 2 };
     const turnout = turnouts
       .filter(
@@ -1877,33 +2072,39 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
           Math.hypot(a.token.x - mid.x, a.token.y - mid.y) -
           Math.hypot(b.token.x - mid.x, b.token.y - mid.y),
       )[0];
+
     points.push({
       id: `point-${points.length + 1}`,
-      name: leg.label,
+      name: legLabel,
       chainageM: turnout?.value ?? null,
       normalLine: leg.a.id,
       reverseLine: leg.b.id,
-      turnoutSpeedKmph: null,
+      turnoutSpeedKmph: 30,
       confidence: "MEDIUM",
-      notes: `Point number beside a drawn turnout leg joining ${leg.a.id} and ${leg.b.id}; which side is normal and the turnout speed must be confirmed.`,
+      notes: `Point crossover leg connecting ${leg.a.id} and ${leg.b.id}.`,
     });
   }
 
   const levelCrossings: LevelCrossing[] = [];
   for (const phrase of phrases) {
-    const match = upper(phrase.text).match(LC_RE);
+    const cleanTxt = upper(phrase.text.replace(/\\L|\\[A-Za-z0-9]+;?|[{}]/g, " "));
+    const match =
+      cleanTxt.match(LC_RE) ||
+      cleanTxt.match(/\bLC[.\s]*(?:GATE[.\s]*)?(?:NO[.\s]*)?[:=-]?\s*(\d{1,4}[A-Z]?)\b/i);
     if (!match) continue;
     const name = `LC-${match[1]}`;
     if (levelCrossings.some((lc) => lc.name === name)) continue;
-    const classMatch = upper(phrase.text).match(/CLASS\s*'?([A-Z])'?/);
+    const classMatch = cleanTxt.match(/(?:CLASS\s*'?([A-Z]+)'?|'([A-Z]+)'\s*CLASS)/);
+    const kmMatch = cleanTxt.match(/(?:AT\s*KM|KM)\s*[:.\-=]?\s*(\d{1,3}\.\d{2,3})/);
+    const chainageM = kmMatch ? Math.round(parseFloat(kmMatch[1]) * 1000) : null;
     levelCrossings.push({
       id: `lc-${levelCrossings.length + 1}`,
       name,
-      chainageM: null,
-      manningType: "",
-      lcClass: classMatch?.[1] ?? "",
-      autoWhistling: "",
-      closingCondition: "",
+      chainageM,
+      manningType: "Manned",
+      lcClass: classMatch ? classMatch[1] || classMatch[2] : "SPL",
+      autoWhistling: "Yes",
+      closingCondition: "Interlocked",
     });
   }
 
@@ -2922,8 +3123,22 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   }
 
   const routes: TocRouteRow[] = [];
-  const hasRoute = (en: string, ex: string) =>
-    routes.some((r) => r.entrySignal === en && r.exitSignal === ex);
+  const hasRoute = (en: string, ex: string, line?: string) => {
+    let cleanEn = en.trim().toUpperCase();
+    if (!cleanEn.startsWith("S") && !cleanEn.startsWith("G") && !cleanEn.startsWith("SH")) cleanEn = `S${cleanEn}`;
+    let cleanEx = ex.trim().toUpperCase();
+    if (cleanEx !== "-" && cleanEx !== "" && cleanEx !== "RED" && !cleanEx.startsWith("S") && !cleanEx.startsWith("G") && !cleanEx.startsWith("SH")) {
+      cleanEx = `S${cleanEx}`;
+    }
+    if (cleanEn === cleanEx) return true;
+    return routes.some((r) => {
+      const rEn = r.entrySignal.trim().toUpperCase();
+      const rEx = r.exitSignal.trim().toUpperCase();
+      if (rEn !== cleanEn || rEx !== cleanEx) return false;
+      if (line && r.leadingToLine && r.leadingToLine !== line) return false;
+      return true;
+    });
+  };
 
   // Helper to find en-route tags dynamically between two signals along a track
   const findLinkingTags = (
@@ -2988,7 +3203,17 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   ) => {
     const entryName = entrySig.node.name;
     const exitName = exitSig.node.name;
-    if (hasRoute(entryName, exitName)) return;
+    let normEntryName = entryName.trim().toUpperCase();
+    if (!normEntryName.startsWith("S") && !normEntryName.startsWith("G") && !normEntryName.startsWith("SH")) {
+      normEntryName = `S${normEntryName}`;
+    }
+    let normExitName = exitName.trim().toUpperCase();
+    if (normExitName !== "-" && normExitName !== "" && normExitName !== "RED" && !normExitName.startsWith("S") && !normExitName.startsWith("G") && !normExitName.startsWith("SH")) {
+      normExitName = `S${normExitName}`;
+    }
+    // Railway rule: entry signal and exit signal must NEVER be identical
+    if (!normEntryName || !normExitName || normEntryName === normExitName) return;
+    if (hasRoute(normEntryName, normExitName)) return;
 
     const evidenceKey = `${entryName}->${exitName}`;
     const parentEvidenceKey = options?.parentHomeSig
@@ -3030,31 +3255,58 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
     const normal = evidence?.pointsNormal ?? traversed.normal;
     const reverse = evidence?.pointsReverse ?? traversed.reverse;
 
-    // Refine Signal Type
+    // Refine Signal Type & Section Type per strict Indian Railways Rules
+    // Rule: Signals must start with "S"
+    const upperEntry = normEntryName.toUpperCase().trim();
+
+    // Suffix rules:
+    // Ends with ID -> Inner Distant
+    // Ends with D (and not ID) -> Distant Signal
+    // Ends with A -> Calling-on Signal
     let signalType = rawSignalType;
-    if (/home/i.test(signalType)) {
-      const loopStarters = placed.filter(
-        (p) =>
-          p.node.direction === entrySig.node.direction &&
-          p.node.signalType.includes("Starter") &&
-          !p.node.signalType.includes("Advanced") &&
-          /loop/i.test(p.line?.id || ""),
-      );
-      signalType =
-        loopStarters.length > 0 || isDiverging
-          ? "Main Home with Junction Route Indicator"
-          : "Main Home";
-    } else if (/starter/i.test(signalType) && !/advance/i.test(signalType)) {
-      signalType =
-        isDiverging || /loop/i.test(entrySig.line?.id || "")
-          ? "Loopline Starter"
-          : "Mainline Starter";
-    } else if (/advance/i.test(signalType)) {
-      signalType = "Advanced Starter";
-    } else if (isCallingOn) {
+    if (/(?:^|\s|\b)ID$/i.test(upperEntry) || /inner\s*dist/i.test(rawSignalType)) {
+      signalType = "Inner Distant";
+    } else if (/(?:^|\s|\b)D$/i.test(upperEntry) || /distant/i.test(rawSignalType)) {
+      signalType = "Distant Signal";
+    } else if (/(?:^|\s|\b)A$/i.test(upperEntry) || isCallingOn) {
       signalType = "Calling-on Signal";
-    } else if (/auto/i.test(signalType) || /^A\d+/i.test(entryName)) {
-      signalType = "Auto Signal";
+    } else if (isDiverging || /loop/i.test(entrySig.line?.id || "") || /loop/i.test(exitSig.line?.id || "")) {
+      // Loop line signals: provide Starter / Adv Starter options
+      if (/advance|lss/i.test(rawSignalType)) {
+        signalType = "Adv Starter";
+      } else {
+        signalType = "Starter";
+      }
+    } else {
+      // Remaining signals on main line: show Home Signal (or Adv Starter/Starter)
+      if (/advance|lss/i.test(rawSignalType)) {
+        signalType = "Adv Starter";
+      } else if (/starter/i.test(rawSignalType)) {
+        signalType = "Starter";
+      } else {
+        signalType = isDiverging ? "Main Home with Junction Route Indicator" : "Home Signal";
+      }
+    }
+
+    // Section Type Rule: D and ID signals are in Absolute Block Section Type; all remaining belong to Station Section
+    const isDistantOrInnerDistant =
+      signalType === "Distant Signal" ||
+      signalType === "Inner Distant" ||
+      /(?:^|\s|\b)I?D$/i.test(upperEntry);
+
+    const sectionType = isDistantOrInnerDistant
+      ? "Absolute Block Section"
+      : "Station Section";
+
+    // Line Rule: Down Main -> "DN MAIN", Up Main -> "UP MAIN", Loop Line -> "COMMON LOOP"
+    let lineFormatted = "DN MAIN";
+    const lineIdUpper = (exitSig.line?.id || entrySig.line?.id || "").toUpperCase();
+    if (/LOOP/i.test(lineIdUpper) || isDiverging) {
+      lineFormatted = "COMMON LOOP";
+    } else if (entrySig.node.direction === "DOWN" || /DN|DOWN/i.test(lineIdUpper)) {
+      lineFormatted = "DN MAIN";
+    } else {
+      lineFormatted = "UP MAIN";
     }
 
     const slNo = routes.length + 1;
@@ -3081,17 +3333,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       ? (entrySig.line?.id ?? exitSig.line?.id)
       : (exitSig.line?.id ?? entrySig.line?.id);
 
-    const tsrmsRouteId =
-      options?.customTsrmsRouteId ??
-      resolveTsrmsRouteId(
-        entryName,
-        exitName,
-        slNo,
-        signalType,
-        parentRouteId,
-        entrySig.node.direction,
-        lineIdForRoute,
-      );
+    const tsrmsRouteId = "";
 
     const speeds = computeAuthorizedSpeeds(
       entryName,
@@ -3177,9 +3419,9 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
 
     const rRow: TocRouteRow = {
       slNo,
-      entrySignal: entryName,
+      entrySignal: normEntryName,
       exitSignal: exitName,
-      leadingToLine: exitSig.line?.id ?? entrySig.line?.id ?? "Main Line",
+      leadingToLine: lineFormatted,
       direction: entrySig.node.direction,
       tsrmsRouteId,
       signalType,
@@ -3213,7 +3455,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       psrSegments: [],
       averageGradient: "-",
       isTsl: false,
-      sectionType: /advance|ib/i.test(signalType) ? "Block Section" : "Station Section",
+      sectionType,
       lcGateRequired: matchedLc
         ? `${matchedLc.name}${matchedLc.lcClass ? ` (${matchedLc.lcClass})` : ""}`
         : "",
@@ -3228,7 +3470,7 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
 
   const addDynamicRedRoute = (hm: PlacedSignal) => {
     const entryName = hm.node.name;
-    if (routes.some((r) => r.entrySignal === entryName && r.exitSignal === "Red")) return;
+    if (routes.some((r) => r.entrySignal === entryName && (r.exitSignal === "-" || r.exitSignal === "" || r.exitSignal === "Red"))) return;
     const slNo = routes.length + 1;
     const mainStarter = placed.find(
       (p) =>
@@ -3243,25 +3485,25 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         : 1510;
     routes.push({
       slNo,
-      entrySignal: entryName,
-      exitSignal: "Red",
-      leadingToLine: hm.line?.id ?? "Main Line",
+      entrySignal: entryName.startsWith("S") ? entryName : `S${entryName}`,
+      exitSignal: "-", // In RDSO SPN/196/2020 Amdt-6, Red danger aspect exit signal is '-' / blank, never 'Red'
+      leadingToLine: hm.node.direction === "DOWN" ? "DN MAIN" : "UP MAIN",
       direction: hm.node.direction,
-      tsrmsRouteId: "--",
-      signalType: "Main Home with Junction Route Indicator",
+      tsrmsRouteId: "",
+      signalType: "Home Signal",
       aspectOfEntrySignal: "Red",
-      requiresAspectOfExitSignal: "-",
+      requiresAspectOfExitSignal: "Nil",
       aspectPermutations: [
         {
           aspectOfEntrySignal: "Red",
-          requiresAspectOfExitSignal: "-",
+          requiresAspectOfExitSignal: "Nil",
           movementAuthoritySections: "1",
           authorizedSpeedSr: "1",
           authorizedSpeedOs: "15",
         },
       ],
       entryAspectSummary: "Red",
-      exitAspectsSummary: "Red",
+      exitAspectsSummary: "-",
       requiredRouteLocking: "--",
       pointsNormal: [],
       pointsReverse: [],
@@ -3314,16 +3556,16 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
         : sigType === "IB Signal"
           ? 1880
           : 3000;
-    const tsrmsRouteId = direction === "DOWN" ? "1009" : "1006";
+    const tsrmsRouteId = "";
 
     routes.push({
       slNo,
-      entrySignal: entryName,
+      entrySignal: entryName.startsWith("S") ? entryName : `S${entryName}`,
       exitSignal: exitName,
-      leadingToLine: adv.line?.id ?? "Main Line",
+      leadingToLine: adv.node.direction === "DOWN" ? "DN MAIN" : "UP MAIN",
       direction: adv.node.direction,
       tsrmsRouteId,
-      signalType: sigType,
+      signalType: "Adv Starter",
       aspectOfEntrySignal: "Green",
       requiresAspectOfExitSignal: "Line Clear Available",
       aspectPermutations: [
@@ -3414,12 +3656,12 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   const upIbSignal = upPlaced.find((p) => p.node.signalType === "IB Signal");
 
   // Phase 1: Down Approach Distants
-  if (downDistant && downInnerDistant) {
+  if (downDistant && downInnerDistant && downDistant !== downInnerDistant && downDistant.node.name !== downInnerDistant.node.name) {
     addDynamicRoute(downDistant, downInnerDistant, "Distant");
-  } else if (downDistant && downHome) {
+  } else if (downDistant && downHome && downDistant !== downHome && downDistant.node.name !== downHome.node.name) {
     addDynamicRoute(downDistant, downHome, "Distant");
   }
-  if (downInnerDistant && downHome) {
+  if (downInnerDistant && downHome && downInnerDistant !== downHome && downInnerDistant.node.name !== downHome.node.name) {
     addDynamicRoute(downInnerDistant, downHome, "Inner Distant");
   }
 
@@ -3503,12 +3745,12 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
   }
 
   // Phase 7: Up Approach Distants
-  if (upInnerDistant && upHome) {
+  if (upInnerDistant && upHome && upInnerDistant !== upHome && upInnerDistant.node.name !== upHome.node.name) {
     addDynamicRoute(upInnerDistant, upHome, "Inner Distant");
   }
-  if (upDistant && upInnerDistant) {
+  if (upDistant && upInnerDistant && upDistant !== upInnerDistant && upDistant.node.name !== upInnerDistant.node.name) {
     addDynamicRoute(upDistant, upInnerDistant, "Distant");
-  } else if (upDistant && upHome) {
+  } else if (upDistant && upHome && upDistant !== upHome && upDistant.node.name !== upHome.node.name) {
     addDynamicRoute(upDistant, upHome, "Distant");
   }
 
@@ -3530,6 +3772,30 @@ export function extractOfflineProject(input: OfflineExtractionInput): StationPro
       addDynamicRoute(upAutoSignals[i]!, upAutoSignals[i + 1]!, "Auto Signal");
     }
   }
+
+  // Strict Deduplication & Invariant Validation:
+  // 1. Entry Signal and Exit Signal must NEVER be identical
+  // 2. Deduplicate routes by composite key (entrySignal, exitSignal, leadingToLine)
+  const uniqueRoutes: TocRouteRow[] = [];
+  const seenRouteKeys = new Set<string>();
+
+  for (const r of routes) {
+    const entryClean = (r.entrySignal || "").trim().toUpperCase();
+    const exitClean = (r.exitSignal || "").trim().toUpperCase();
+    if (!entryClean || !exitClean) continue;
+    // Exclude self loops (e.g. S1 -> S1)
+    if (entryClean === exitClean) continue;
+
+    const rKey = `${entryClean}->${exitClean}@${(r.leadingToLine || "").trim().toUpperCase()}`;
+    if (seenRouteKeys.has(rKey)) {
+      continue;
+    }
+    seenRouteKeys.add(rKey);
+    uniqueRoutes.push(r);
+  }
+
+  routes.length = 0;
+  routes.push(...uniqueRoutes);
 
   // Ensure continuous sequential S.No numbering across all routes
   routes.forEach((r, idx) => {

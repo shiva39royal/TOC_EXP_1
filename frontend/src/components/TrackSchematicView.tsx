@@ -205,6 +205,8 @@ export const TrackSchematicView: React.FC<TrackSchematicViewProps> = ({
           <CadDrawingViewer
             sourceLayout={project.sourceLayout}
             stationTitle={`${project.metadata.stationName} (${project.metadata.stationCode})`}
+            project={project}
+            selectedRouteId={selectedRoute ? selectedRoute.slNo : null}
           />
         </div>
 

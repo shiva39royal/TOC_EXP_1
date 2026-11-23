@@ -6,12 +6,20 @@ export type TocExportSection =
 
 function formatRfidSequence(r: TocRouteRow): string {
   const parts: string[] = [];
+  let hasZero = false;
   for (const item of r.linkingSequence) {
-    if (r.entryFootTag && item.tagId === r.entryFootTag) continue;
-    parts.push(`(${item.distanceM}, ${item.tagId})`);
+    if (item.distanceM === 0 || (r.entryFootTag && item.tagId === r.entryFootTag)) {
+      hasZero = true;
+      parts.push(`(0, ${r.entryFootTag || item.tagId})`);
+    } else {
+      parts.push(`(${item.distanceM}, ${item.tagId})`);
+    }
+  }
+  if (!hasZero && r.entryFootTag) {
+    parts.unshift(`(0, ${r.entryFootTag})`);
   }
   if (parts.length === 0) {
-    return r.enRouteTags.filter((t) => t !== r.entryFootTag).join(", ") || "-";
+    return r.entryFootTag ? `(0, ${r.entryFootTag})` : "-";
   }
   return parts.join(", ");
 }
@@ -53,7 +61,6 @@ export function exportTocToExcel(
         "Entry Signal": pIdx === 0 ? r.entrySignal : "",
         "Exit Signal": pIdx === 0 ? r.exitSignal : "",
         Line: pIdx === 0 ? r.leadingToLine : "",
-        "TSRMS Route ID": pIdx === 0 ? r.tsrmsRouteId || String(r.slNo) : "",
         "Section Type": pIdx === 0 ? r.sectionType || "Station Section" : "",
         "Signal Type": pIdx === 0 ? r.signalType : "",
         "Aspect of Entry Signal": showAspect ? perm.aspectOfEntrySignal : "",
@@ -581,7 +588,6 @@ export function exportTocToCsv(
           "Entry Signal",
           "Exit Signal",
           "Line",
-          "TSRMS Route ID",
           "Section Type",
           "Signal Type",
           "Aspect of Entry Signal",
@@ -625,7 +631,6 @@ export function exportTocToCsv(
               pIdx === 0 ? r.entrySignal : "",
               pIdx === 0 ? r.exitSignal : "",
               pIdx === 0 ? r.leadingToLine : "",
-              pIdx === 0 ? r.tsrmsRouteId || String(r.slNo) : "",
               pIdx === 0 ? r.sectionType || "Station Section" : "",
               pIdx === 0 ? r.signalType : "",
               perm.aspectOfEntrySignal,
@@ -763,54 +768,129 @@ export function exportTocToPdf(
   const refSip = project.metadata.refLayout || "----";
   const refToc = project.metadata.refToc || "----";
 
-  const renderHeader = (sheetTitle: string, drgSuffix: string) => `
-    <table class="header-table">
-      <tr>
-        <td style="width: 25%;">
-          <div class="bold" style="font-size: 10pt;">INDIAN RAILWAYS</div>
-          <div>${railway}</div>
-          <div>${division} Division</div>
-        </td>
-        <td style="width: 50%;" class="text-center">
-          <div class="title-banner">${sheetTitle}</div>
-          <div class="subtitle">STATION: ${stationName} (${stationCode}) &nbsp;|&nbsp; STATION ID: ${stationId}</div>
-          <div style="font-size: 7.5pt; margin-top: 2px;">IN ACCORDANCE WITH RDSO/SPN/196/2020 VERSION 4.0 AMDT-6 (ANNEXURE-I)</div>
-        </td>
-        <td style="width: 25%; font-size: 7.5pt;">
-          <div><b>REF SIP NO:</b> ${refSip}</div>
-          <div><b>REF TOC NO:</b> ${refToc}</div>
-          <div><b>DRG NO:</b> KAVACH_${drgSuffix}_${stationCode}_2.0.0</div>
-          <div><b>REV NO:</b> 0 (Initial Revision)</div>
-        </td>
-      </tr>
-    </table>
+  const renderHeader = (sheetTitle?: string) => `
+    <div class="sheet-top-5">
+      <table class="station-meta-strip">
+        <tr>
+          <td style="width: 50%;">
+            <span class="label">Station Name:</span> <span class="val">${stationName}</span>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+            <span class="label">Division:</span> <span class="val">${division}</span>
+          </td>
+          <td style="width: 50%;">
+            <span class="label">Station ID:</span> <span class="val">${stationId}</span>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+            <span class="label">Section:</span> <span class="val">${project.metadata.section || "Station Section"}</span>
+          </td>
+        </tr>
+      </table>
+    </div>
   `;
 
   const renderFooter = (drgSuffix: string, pageNo: number, totalPages: number) => `
-    <table class="approval-table" style="margin-top: 6px;">
-      <tr>
-        <td style="width: 20%; height: 32px;">
-          <div style="font-size: 7pt; color: #555;">PREPARED BY:</div>
-          <div class="bold" style="font-size: 7.5pt; margin-top: 10px;">${project.metadata.preparedBy || "JE / SSE / Signal"}</div>
-        </td>
-        <td style="width: 20%;">
-          <div style="font-size: 7pt; color: #555;">CHECKED BY:</div>
-          <div class="bold" style="font-size: 7.5pt; margin-top: 10px;">${project.metadata.checkedBy || "ASTE / DSTE"}</div>
-        </td>
-        <td style="width: 20%;">
-          <div style="font-size: 7pt; color: #555;">RECOMMENDED BY:</div>
-          <div class="bold" style="font-size: 7.5pt; margin-top: 10px;">${project.metadata.signOffEngineerName || "Dy.CSTE"}</div>
-        </td>
-        <td style="width: 20%;">
-          <div style="font-size: 7pt; color: #555;">APPROVED BY:</div>
-          <div class="bold" style="font-size: 7.5pt; margin-top: 10px;">${project.metadata.approvedBy || "RDSO"}</div>
-        </td>
-        <td style="width: 20%;" class="text-center">
-          <div class="bold" style="font-size: 9pt;">SHEET ${pageNo} OF ${totalPages}</div>
-          <div style="font-size: 7pt;">KAVACH_${drgSuffix}_${stationCode}</div>
-        </td>
-      </tr>
-    </table>
+    <div class="sheet-bottom-20">
+      <!-- Upper Tier of Bottom 20% Block (Pages 16 & 17) -->
+      <table class="bottom-ref-grid">
+        <tr>
+          <!-- Left References Box -->
+          <td style="width: 44%; vertical-align: top; padding: 4px 8px; border: 1px solid #000;">
+            <div style="font-size: 8.5pt; font-weight: bold; margin-bottom: 2px;">
+              ${stationName}(${stationCode})-${stationId} &nbsp;&nbsp;&nbsp;&nbsp; SIGNAL &amp; TELECOMMUNICATIONS
+            </div>
+            <div style="font-size: 7.5pt; margin-top: 1px;">
+              <b>REF: SIP NO:</b> ${refSip} &nbsp;&nbsp; <b>&amp; TOC:</b> ${refToc}
+            </div>
+            <div style="font-size: 7.5pt; margin-top: 1px;">
+              <b>REF:</b> KAVACH_RFID_TAG_LAYOUT_${stationCode}_2.0.2
+            </div>
+            <div style="font-size: 7.5pt; margin-top: 1px;">
+              <b>TABLE NO:</b> KAVACH_TABLE_OF_CONTROL_${stationCode}_2.0.2
+            </div>
+          </td>
+
+          <!-- Middle HQ / Designations Box -->
+          <td style="width: 38%; vertical-align: middle; padding: 4px 6px; border: 1px solid #000;">
+            <div style="display: flex; justify-content: space-around; font-size: 7pt; font-weight: bold; border-bottom: 1px solid #000; padding-bottom: 3px; margin-bottom: 3px;">
+              <span>JE/SSE/Proj/HQ/SCR</span>
+              <span>ASTE/Proj/HQ/SCR</span>
+              <span>Dy.CSTE/Proj/HQ/SCR</span>
+            </div>
+            <div style="display: flex; justify-content: space-around; font-size: 7pt; font-weight: bold;">
+              <span>JE/SSE/RDSO/LKO</span>
+              <span>ADE/RDSO/LKO</span>
+              <span>DIRECTOR/RDSO/LKO</span>
+            </div>
+          </td>
+
+          <!-- Right KAVACH Header Box -->
+          <td style="width: 18%; vertical-align: middle; text-align: center; padding: 4px; border: 1px solid #000;">
+            <div style="font-size: 11pt; font-weight: 900; letter-spacing: 1px;">KAVACH</div>
+            <div style="font-size: 8pt; font-weight: bold; margin-top: 2px;">${stationName}(${stationCode})-${stationId}</div>
+          </td>
+        </tr>
+      </table>
+
+      <!-- Lower Tier of Bottom 20% Block: Signatures, Firm Logo, Drg No, Sheet X of Y (Pages 16 & 17) -->
+      <table class="bottom-approval-grid" style="margin-top: -1px;">
+        <tr>
+          <!-- Signatures Table -->
+          <td style="width: 44%; padding: 0; vertical-align: top; border: 1px solid #000;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 6.5pt;">
+              <tr>
+                <td style="width: 18%; border-right: 1px solid #000; border-bottom: 1px solid #000; font-weight: bold; padding: 2px 4px;">&nbsp;</td>
+                <td style="width: 41%; border-right: 1px solid #000; border-bottom: 1px solid #000; font-weight: bold; text-align: center; padding: 2px 4px;">PREPARED BY</td>
+                <td style="width: 41%; border-bottom: 1px solid #000; font-weight: bold; text-align: center; padding: 2px 4px;">CHECKED BY</td>
+              </tr>
+              <tr>
+                <td style="border-right: 1px solid #000; border-bottom: 1px solid #000; font-weight: bold; padding: 3px 4px;">SIGN</td>
+                <td style="border-right: 1px solid #000; border-bottom: 1px solid #000; padding: 3px 4px;">&nbsp;</td>
+                <td style="border-bottom: 1px solid #000; padding: 3px 4px;">&nbsp;</td>
+              </tr>
+              <tr>
+                <td style="border-right: 1px solid #000; border-bottom: 1px solid #000; font-weight: bold; padding: 2px 4px;">NAME</td>
+                <td style="border-right: 1px solid #000; border-bottom: 1px solid #000; font-weight: bold; text-align: center; padding: 2px 4px;">${project.metadata.preparedBy || "CH MASTANAIAH"}</td>
+                <td style="border-bottom: 1px solid #000; font-weight: bold; text-align: center; padding: 2px 4px;">${project.metadata.checkedBy || "V VARUN KUMAR"}</td>
+              </tr>
+              <tr>
+                <td colspan="3" style="padding: 2px 4px; text-align: center; font-size: 6.5pt;">
+                  <span style="font-weight: bold;">APPROVED BY:</span> ${project.metadata.approvedBy || "EXE. DIRECTOR TELE-II"}
+                </td>
+              </tr>
+            </table>
+          </td>
+
+          <!-- Firm Logo Box -->
+          <td style="width: 18%; text-align: center; vertical-align: middle; border: 1px solid #000; padding: 4px;">
+            <div style="font-size: 8pt; font-weight: bold; color: #555; border: 1px dashed #999; padding: 10px 4px;">
+              Firm Logo
+            </div>
+          </td>
+
+          <!-- Drawing No & Sheet Info Box -->
+          <td style="width: 38%; padding: 4px 6px; vertical-align: middle; border: 1px solid #000;">
+            <div style="font-size: 9.5pt; font-weight: 900; text-align: center; letter-spacing: 0.5px;">
+              KAVACH &nbsp; TABLE OF CONTROL
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 4px; font-size: 7pt;">
+              <div>
+                <div><b>S.C.RLY.DRG.NO.</b></div>
+                <div><b>KAVACH:</b> <span class="mono">${refSip || "IPU. 0011C Alt-5"}</span></div>
+              </div>
+              <table style="border-collapse: collapse; text-align: center; font-size: 7pt; border: 1px solid #000;">
+                <tr>
+                  <th style="border: 1px solid #000; padding: 1px 6px; font-weight: bold; background: #f0f0f0;">SHEET</th>
+                  <th style="border: 1px solid #000; padding: 1px 6px; font-weight: bold; background: #f0f0f0;">SHEETS</th>
+                </tr>
+                <tr>
+                  <td style="border: 1px solid #000; padding: 1px 6px; font-weight: bold; font-size: 9pt;">${pageNo}</td>
+                  <td style="border: 1px solid #000; padding: 1px 6px; font-weight: bold; font-size: 9pt;">${totalPages}</td>
+                </tr>
+              </table>
+            </div>
+          </td>
+        </tr>
+      </table>
+    </div>
   `;
 
   const renderRouteRows = (routesSubset: typeof project.routes) => {
@@ -841,24 +921,20 @@ export function exportTocToPdf(
           <td class="text-center mono bold">${pIdx === 0 ? r.slNo : ""}</td>
           <td class="mono bold text-center">${pIdx === 0 ? r.entrySignal : ""}</td>
           <td class="mono bold text-center">${pIdx === 0 ? r.exitSignal : ""}</td>
-          <td>${pIdx === 0 ? r.leadingToLine : ""}</td>
-          <td class="text-center mono">${pIdx === 0 ? r.tsrmsRouteId || r.slNo : ""}</td>
           <td>${pIdx === 0 ? r.sectionType || "Station Section" : ""}</td>
+          <td>${pIdx === 0 ? r.leadingToLine : ""}</td>
           <td>${pIdx === 0 ? r.signalType : ""}</td>
           <td class="bold text-center">${showAspect ? p.aspectOfEntrySignal : ""}</td>
           <td class="text-center">${p.requiresAspectOfExitSignal}</td>
-          <td class="mono text-center bold">${pIdx === 0 ? r.requiredRouteLocking || "-" : ""}</td>
           <td class="mono text-center">${pIdx === 0 ? r.pointsNormal.join(", ") || "-" : ""}</td>
           <td class="mono text-center">${pIdx === 0 ? r.pointsReverse.join(", ") || "-" : ""}</td>
-          <td class="mono">${pIdx === 0 ? r.trackCktUp || "-" : ""}</td>
-          <td class="mono">${pIdx === 0 ? r.trackCircuitInOverlap || r.overlapTrackCkt || "-" : ""}</td>
-          <td class="mono">${pIdx === 0 ? r.tinsRequiresFree.join(", ") || "-" : ""}</td>
-          <td class="mono">${pIdx === 0 ? r.tinsInOverlap?.join(", ") || r.overlapTins?.join(", ") || "-" : ""}</td>
+          <td class="mono text-center">${pIdx === 0 ? r.trackCktUp || "-" : ""}</td>
+          <td class="mono text-center">${pIdx === 0 ? r.tinsRequiresFree.join(", ") || "-" : ""}</td>
+          <td class="mono text-center">${pIdx === 0 ? r.tinsInOverlap?.join(", ") || r.overlapTins?.join(", ") || "-" : ""}</td>
           <td class="mono text-center bold">${pIdx === 0 ? r.entryFootTag : ""}</td>
           <td class="mono" style="font-size: 6.5pt;">${pIdx === 0 ? seqStr : ""}</td>
           <td class="mono text-right bold">${pIdx === 0 ? r.distanceBetweenSignalsM : ""}</td>
           <td class="mono text-center bold">${p.movementAuthoritySections}</td>
-          <td class="mono text-center bold">${pIdx === 0 ? r.authorizedSpeedSr || p.authorizedSpeedSr || "MPS" : p.authorizedSpeedSr || ""}</td>
           <td class="mono text-center bold">${p.authorizedSpeedOs || r.authorizedSpeedOs || "MPS"}</td>
         </tr>
       `;
@@ -940,39 +1016,33 @@ export function exportTocToPdf(
     isLastPart: boolean,
   ) => `
     <div class="sheet-page">
-      <div>
-        ${renderHeader("STATIONARY KAVACH TABLE OF CONTROL - SELECTION TABLE", "TOC")}
-        <div class="section-title">TABLE 1: STATIONARY KAVACH TABLE OF CONTROL - PART ${tablePartNum} OF ${tableTotalParts}</div>
-        <table class="data-table" style="margin-top: 4px;">
+      ${renderHeader()}
+
+      <div class="table-container-75">
+        <table class="data-table">
           <thead>
             <tr>
-              <th rowspan="2">S.No</th>
-              <th rowspan="2">Entry Sig</th>
-              <th rowspan="2">Exit Sig</th>
-              <th rowspan="2">Line</th>
-              <th rowspan="2">TSRMS ID</th>
+              <th rowspan="2">S. No</th>
+              <th rowspan="2">Entry Signal</th>
+              <th rowspan="2">Exit Signal</th>
               <th rowspan="2">Section Type</th>
+              <th rowspan="2">Line</th>
               <th rowspan="2">Signal Type</th>
-              <th rowspan="2">Aspect of Entry Sig</th>
-              <th rowspan="2">Requires Aspects Exit</th>
-              <th rowspan="2">Req Route Locking</th>
-              <th colspan="2">Points in Route</th>
-              <th colspan="2">Requires Track Ckt Up</th>
-              <th colspan="2">TINs Required Free</th>
-              <th rowspan="2">Foot Tag</th>
-              <th rowspan="2">Check RFID Sequence</th>
-              <th rowspan="2">Dist (m)</th>
-              <th rowspan="2">MA</th>
-              <th rowspan="2">SR Speed</th>
-              <th rowspan="2">OS Speed</th>
+              <th rowspan="2">Aspects of Entry Signal</th>
+              <th rowspan="2">Requires Aspects of Exit Signal</th>
+              <th colspan="2">Requires Points in Route</th>
+              <th rowspan="2">Requires Track Circuit "UP" in Route</th>
+              <th rowspan="2">TIN’s (Track Identification Number) Requires Free</th>
+              <th rowspan="2">TIN's requires Free In Overlap</th>
+              <th rowspan="2">Entry Signal Foot Tag</th>
+              <th rowspan="2">Check RFID Sequence (Linking Distance, En-Route Tag)</th>
+              <th rowspan="2">Distance between Entry & Exit Signal (Meters)</th>
+              <th rowspan="2">Movement Authority From Foot of Entry Signal (in Sections)</th>
+              <th rowspan="2">Authorized Speed (kmph) in OS</th>
             </tr>
             <tr>
               <th>Normal</th>
               <th>Reverse</th>
-              <th>In Route</th>
-              <th>In Overlap</th>
-              <th>In Route</th>
-              <th>In Overlap</th>
             </tr>
           </thead>
           <tbody>
@@ -1037,6 +1107,23 @@ export function exportTocToPdf(
               <td style="font-family: monospace; font-weight: bold;">
                 ${project.authorizedSpeedOnSightKmph || 100} kmph
               </td>
+            </tr>
+          </table>
+
+          <table class="meta-table" style="margin-top: 4px;">
+            <tr>
+              <th colspan="7" style="background: #f1f5f9; text-align: left; font-size: 7.5pt; font-weight: bold; padding: 2px 6px;">
+                RDSO KAVACH RFID TAG LEGEND (SPN/196/2020 Amdt-6)
+              </th>
+            </tr>
+            <tr style="font-size: 7pt; text-align: center;">
+              <td style="padding: 2px 4px;"><b>[N]</b> NORMAL TAG</td>
+              <td style="padding: 2px 4px;"><b>[S]</b> SIGNAL FOOT TAG</td>
+              <td style="padding: 2px 4px;"><b>[T]</b> TIN / TURNOUT TAG</td>
+              <td style="padding: 2px 4px;"><b>[X]</b> EXIT TAG</td>
+              <td style="padding: 2px 4px;"><b>[G]</b> GATE TAG</td>
+              <td style="padding: 2px 4px;"><b>[A]</b> ADJUSTMENT / JUNCTION TAG</td>
+              <td style="padding: 2px 4px;"><b>[L]</b> ADJACENT LINE TAG</td>
             </tr>
           </table>
         `
@@ -2024,12 +2111,57 @@ export function exportTocToPdf(
       flex-direction: column;
       justify-content: space-between;
       border: 2px solid #000;
-      padding: 6px;
+      padding: 6px 10px;
       margin-bottom: 20px;
       background: #fff;
     }
     .sheet-page:last-child {
       page-break-after: auto;
+    }
+    .sheet-top-5 {
+      height: 5%;
+      min-height: 5%;
+      display: flex;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .station-meta-strip {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 9.5pt;
+      font-family: inherit;
+    }
+    .station-meta-strip td {
+      border: none !important;
+      padding: 2px 4px;
+    }
+    .station-meta-strip .label {
+      font-weight: normal;
+      color: #000;
+    }
+    .station-meta-strip .val {
+      font-weight: bold;
+      color: #000;
+    }
+    .table-container-75 {
+      flex: 1 1 75%;
+      height: 75%;
+      min-height: 75%;
+      overflow: hidden;
+      margin: 2px 0;
+    }
+    .sheet-bottom-20 {
+      flex: 0 0 20%;
+      height: 20%;
+      min-height: 20%;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      margin-top: 4px;
+    }
+    .bottom-ref-grid, .bottom-approval-grid {
+      width: 100%;
+      border-collapse: collapse;
     }
     @media print {
       body {
